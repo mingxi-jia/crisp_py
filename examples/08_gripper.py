@@ -8,55 +8,43 @@ import yaml
 
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
-project_root_path = Path("/home/lsy_franka/repos/crisp_py")
+project_root_path = Path(".")
 
-right_config = None
-with open(project_root_path / "config" / "gripper_right_config.yaml", "r") as file:
-    config = yaml.safe_load(file)
-    right_config = GripperConfig(
-        min_value=config.get("min_value"), max_value=config.get("max_value")
-    )
-
+gripper_config = GripperConfig.from_yaml("/home/mrping/mingxi_ws/crisp/crisp_py/config/gripper_right.yaml")
 # %%
 
-gripper = Gripper(gripper_config=right_config, namespace="follower")
+gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
 gripper.wait_until_ready()
 
 # %%
 freq = 1.0
 rate = gripper.node.create_rate(freq)
 t = 0.0
-while t < 10.0:
-    print(gripper.value)
-    print(gripper.torque)
+while t < 2.0:
+    print(f"gripper.value: {gripper.value}")
+    print(f"gripper.torque: {gripper.torque}")
     rate.sleep()
     t += 1.0 / freq
 
-# %%
-gripper.value
+# franka gripper only support width \in {0, 1}
 
-# Almost fully open
-gripper.set_target(0.9)
+width = 0.
+print(f"moving to {width}")
+gripper.set_target(width)
+rate.sleep()
+# time.sleep(3.0)
 
-time.sleep(3.0)
+width = 1.0
+print(f"moving to {width}")
+gripper.set_target(width)
+rate.sleep()
+# time.sleep(3.0)
 
-# Almost fully closed
-gripper.set_target(0.1)
+gripper.close()
+rate.sleep()
 
-# %%
-try:
-    gripper.reboot()
-except RuntimeError as e:
-    print(e)
+gripper.open()
+rate.sleep()
 
-# %%
-try:
-    gripper.enable_torque()
-except RuntimeError as e:
-    print(e)
+gripper.shutdown()
 
-# %%
-try:
-    gripper.disable_torque()
-except RuntimeError as e:
-    print(e)

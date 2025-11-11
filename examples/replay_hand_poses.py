@@ -1,0 +1,85 @@
+"""Try to follow a "figure eight" target on the yz plane."""
+
+# %%
+import matplotlib.pyplot as plt
+import numpy as np
+import time
+from crisp_py.robot import Robot
+
+left_arm = Robot(namespace="")
+left_arm.wait_until_ready()
+
+# %%
+print(left_arm.end_effector_pose)
+print(left_arm.joint_values)
+
+# %%
+print("Going to home position...")
+left_arm.home()
+homing_pose = left_arm.end_effector_pose.copy()
+
+# %%
+left_arm.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+left_arm.cartesian_controller_parameters_client.load_param_config(
+    # file_path="config/control/gravity_compensation.yaml"
+    # file_path="config/control/default_operational_space_controller.yaml"
+    # file_path="config/control/clipped_cartesian_impedance.yaml"
+    file_path="config/control/default_cartesian_impedance.yaml"
+)
+
+# set gripper
+from crisp_py.gripper.gripper import Gripper, GripperConfig
+
+gripper_config = GripperConfig.from_yaml("/home/mrping/mingxi_ws/crisp/crisp_py/config/gripper_right.yaml")
+gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
+gripper.wait_until_ready()
+gripper.set_target(1.0)
+
+hand_poses = np.load("examples/hand_poses_wrt_world.npy", allow_pickle=True)[()]
+hand_grasp = np.load("examples/grasp.npy", allow_pickle=True)[:-1]
+assert len(hand_poses) == len(hand_grasp), f"Length mismatch: {len(hand_poses)} vs {len(hand_grasp)}"
+print(hand_grasp)
+# %%
+# The move_to function will publish a pose to /target_pose while interpolation linearly
+center = np.array([0.4, 0.0, 0.4])
+ctrl_freq = 50.0
+left_arm.move_to(position=center, speed=0.15)
+left_arm.move_to(position=hand_poses['000000'][:3], speed=0.15)
+
+print("Starting to draw a circle...")
+t = 0.0
+target_pose = left_arm.end_effector_pose.copy()
+rate = left_arm.node.create_rate(ctrl_freq)
+rate = gripper.node.create_rate(1.0)
+# load hand pose
+i=0
+for time_step, hand_pose in hand_poses.items():
+    print(f"Moving to pose {hand_pose}")
+    x, y, z = hand_pose[:3]
+    z = np.clip(z-0.02, 0.06, 0.6)
+    target_pose.position = np.array([x, y, z])
+
+    left_arm.move_to(position=np.array([x, y, z]), speed=0.2)
+    # left_arm.set_target(pose=target_pose)
+    # rate.sleep()
+
+    grasp_value = hand_grasp[i]
+    print(f"Setting gripper to {grasp_value}")
+    gripper.set_target(1-grasp_value)
+    rate.sleep()
+    # time.sleep(0.1)
+
+    t += 1.0 / ctrl_freq
+    i += 1
+
+# t = 0.0
+# while t < 1.0:
+#     # Just wait a bit for the end effector to settle
+#     rate.sleep()
+#     t += 1.0 / ctrl_freq
+
+
+left_arm.home()
+
+# %%
+left_arm.shutdown()

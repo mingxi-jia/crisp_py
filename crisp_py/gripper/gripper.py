@@ -27,14 +27,14 @@ class GripperConfig:
 
     min_value: float
     max_value: float
-    command_topic: str = "gripper_position_controller/commands"
-    joint_state_topic: str = "joint_states"
+    command_topic: str = "/gripper/gripper_position_controller/commands"
+    joint_state_topic: str = "/gripper/joint_states"
     reboot_service: str = "reboot_gripper"
     enable_torque_service: str = "dynamixel_hardware_interface/set_dxl_torque"
     index: int = 0
     publish_frequency: float = 30.0
     max_joint_delay: float = 1.0
-    max_delta: float = 0.1
+    max_delta: float = 1.0
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "GripperConfig":
@@ -105,6 +105,7 @@ class Gripper:
         self.config = (
             gripper_config if gripper_config else GripperConfig(min_value=0.0, max_value=1.0)
         )
+        print(self.config)
 
         self._prefix = f"{namespace}_" if namespace else ""
         self._value = None
