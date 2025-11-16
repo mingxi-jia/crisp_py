@@ -30,7 +30,7 @@ left_arm.cartesian_controller_parameters_client.load_param_config(
 # set gripper
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
-gripper_config = GripperConfig.from_yaml("/home/mrping/mingxi_ws/crisp/crisp_py/config/gripper_right.yaml")
+gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
 gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
 gripper.wait_until_ready()
 gripper.set_target(1.0)
