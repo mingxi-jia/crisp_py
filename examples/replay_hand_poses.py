@@ -42,35 +42,43 @@ print(hand_grasp)
 # %%
 # The move_to function will publish a pose to /target_pose while interpolation linearly
 center = np.array([0.4, 0.0, 0.4])
-ctrl_freq = 50.0
+ctrl_freq = 10.0
 left_arm.move_to(position=center, speed=0.15)
 left_arm.move_to(position=hand_poses['000000'][:3], speed=0.15)
 
 print("Starting to draw a circle...")
 t = 0.0
 target_pose = left_arm.end_effector_pose.copy()
-rate = left_arm.node.create_rate(ctrl_freq)
-rate = gripper.node.create_rate(1.0)
+arm_rate = left_arm.node.create_rate(ctrl_freq)
+gripper_rate = gripper.node.create_rate(ctrl_freq)
+
 # load hand pose
 i=0
+prev_grasp_value = hand_grasp[0]
 for time_step, hand_pose in hand_poses.items():
     print(f"Moving to pose {hand_pose}")
     x, y, z = hand_pose[:3]
     z = np.clip(z-0.02, 0.06, 0.6)
     target_pose.position = np.array([x, y, z])
 
-    left_arm.move_to(position=np.array([x, y, z]), speed=0.2)
-    # left_arm.set_target(pose=target_pose)
-    # rate.sleep()
+    # left_arm.move_to(position=np.array([x, y, z]), speed=0.2)
+    left_arm.set_target(pose=target_pose)
+    arm_rate.sleep()
 
     grasp_value = hand_grasp[i]
-    print(f"Setting gripper to {grasp_value}")
-    gripper.set_target(1-grasp_value)
-    rate.sleep()
-    # time.sleep(0.1)
+    if grasp_value != prev_grasp_value:
+        print(f"Setting gripper to {grasp_value}")
+        gripper.set_target(1-grasp_value)
+        gripper_rate.sleep()
+        time.sleep(1.0)  # wait for gripper to move
 
     t += 1.0 / ctrl_freq
     i += 1
+
+    prev_grasp_value = grasp_value
+
+    if time_step == '000075':
+        break
 
 # t = 0.0
 # while t < 1.0:
