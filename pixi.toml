@@ -73,3 +73,6 @@ crisp_python = { path = ".", editable = true }
 [feature.extra.pypi-dependencies]
 rich = "*"  # For nice prints
 matplotlib = "*"  # to do some plots
+hydra-core = "*"  # For diffusion_policy configuration
+omegaconf = "*"  # Required by hydra-core
+dill = "*"  # For diffusion_policy checkpoints

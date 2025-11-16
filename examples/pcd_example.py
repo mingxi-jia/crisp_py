@@ -5,13 +5,15 @@ import time
 from pathlib import Path
 import rclpy
 import open3d as o3d
+import os
 
 from crisp_py.camera.pointcloud import PointCloudManager
 from crisp_py.robot import Robot
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 import sys
-sys.path.append(str(Path(__file__).parent.parent))
+toolbox_path = '/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox'
+sys.path.append(toolbox_path)
 from robot_filter.arm_segmentor import RobotArmSegmentation
 # %%
 def main():
@@ -37,7 +39,7 @@ def main():
 
     # Initialize robot filter
     robot_seg = RobotArmSegmentation()
-    robot_seg.load_urdf("robot_filter/panda_description/urdf/panda_arm_hand.urdf")
+    robot_seg.load_urdf(os.path.join(toolbox_path, "robot_filter/panda_description/urdf/panda_arm_hand.urdf"))
 
     # Spin in background thread to receive messages
     import threading
@@ -54,7 +56,8 @@ def main():
         # Visualize filtered point cloud
         if pcd is not None:
 
-            print(pcd.shape)
+            # crop pcd using workspace
+            
 
             # Get current joint state from robot
             joint_state = robot.joint_values

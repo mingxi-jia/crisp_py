@@ -1,8 +1,0 @@
-numpy==1.26.4
-open3d
-urchin
-trimesh
-matplotlib
-robosuite
-h5py
-networkx==3.5
