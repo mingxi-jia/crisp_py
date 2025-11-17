@@ -11,8 +11,12 @@ from crisp_py.robot import Robot
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 import sys
-sys.path.append('/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox')
+toolbox_path = '/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox'
+sys.path.append(toolbox_path)
 from robot_filter.arm_segmentor import RobotArmSegmentation
+
+from utils.pcd_utils import render_pcd_from_pose
+from hand.trajectory_loader import PointCloudProcessor
 
 # Diffusion Imports / inits
 sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
@@ -21,37 +25,44 @@ from diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from diffusion_policy.real_world.real_inference_util import get_real_obs_dict
 from diffusion_policy.common.pytorch_util import dict_apply
 
+from scipy.spatial.transform import Rotation as R
+
 import torch
 import numpy as np
 import dill
 import hydra
 
+def visualize_pcd(pcd: np.ndarray):
+    """Visualize point cloud using Open3D.
 
-ctrl_freq = 10.0 # Hz
-ckpt_path = "/home/mingxi/mingxi_ws/handpi/data/data/outputs/2025.11.16/14.49.15_diff_voxel_block_lift_realworld_39_None/checkpoints/latest.ckpt" # TODO: Specify
+    Args:
+        pcd: Point cloud as a numpy array of shape (N, 6) where the first 3 columns are XYZ and the next 3 are RGB.
+    """
+    pcd_o3d = o3d.geometry.PointCloud()
+    pcd_o3d.points = o3d.utility.Vector3dVector(pcd[:, :3])
+    pcd_o3d.colors = o3d.utility.Vector3dVector(pcd[:, 3:])
+    o3d.visualization.draw_geometries([pcd_o3d])
 
-
-def franka_obs_to_diff_obs(pcd_o3d: o3d.geometry.PointCloud, joint_values: np.ndarray):
+def franka_obs_to_diff_obs(pcd, end_effector_pose, gripper_state):
     """Convert Franka observation to diffusion model observation format.
     
     Args:
-        pcd_o3d (o3d.geometry.PointCloud): The input point cloud.
-        joint_values (np.ndarray): The robot's joint values.
+        pcd (np.ndarray): The input point cloud.
+        end_effector_pose (np.ndarray): The robot's end effector pose.
     
     Returns:
         dict: A dictionary containing the formatted observation.
     """
 
-    robot0_eef_pos = joint_values[:3] 
-    robot0_eef_quat = joint_values[3:7]  # !!! Assuming quaternion is in (x, y, z, w) format
-    robot0_gripper_qpos = joint_values[:-1] # !!! Check
-
+    robot0_eef_pos = end_effector_pose.position.copy() 
+    quat = end_effector_pose.orientation.as_quat()
+    robot0_eef_quat = quat  
+    robot0_gripper_qpos = np.array([gripper_state], dtype=int) # !!! Check
+    
     # Create observation dictionary
     obs = {
-        'pcd': {
-            pcd_o3d # !!! Check the format, diffusion expects [1024, 6]
-        },
-        'robot0_eef_pos': robot0_eef_pos.astype(np.float32),
+        'pcd': pcd, # !!! Check the format, diffusion expects [1024, 6]
+        'robot0_eef_pos': robot0_eef_pos.astype(np.float32), 
         'robot0_eef_quat': robot0_eef_quat.astype(np.float32),
         'robot0_gripper_qpos': robot0_gripper_qpos.astype(np.float32),
     }
@@ -62,10 +73,11 @@ def franka_obs_to_diff_obs(pcd_o3d: o3d.geometry.PointCloud, joint_values: np.nd
 def warm_up_policy(obs, policy, cfg):
     with torch.no_grad():
         policy.reset()
+        device = torch.device('cuda')
         obs_dict_np = get_real_obs_dict(
             env_obs=obs, shape_meta=cfg.task.shape_meta)
         obs_dict = dict_apply(obs_dict_np, 
-            lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+            lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
         result = policy.predict_action(obs_dict)
         action = result['action'][0].detach().to('cpu').numpy()
         assert action.shape[-1] == 2
@@ -75,13 +87,15 @@ def warm_up_policy(obs, policy, cfg):
 def get_action(obs, policy, cfg):
     with torch.no_grad():
         s = time.time()
+        device = torch.device('cuda')
         obs_dict_np = get_real_obs_dict(
             env_obs=obs, shape_meta=cfg.task.shape_meta)
-        obs_dict = dict_apply(obs_dict_np, 
-            lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+        obs_dict = dict_apply(obs, 
+            lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
+        print(obs_dict.keys())
         result = policy.predict_action(obs_dict)
         # this action starts from the first obs step
-        action = result['action'].detach().to('cpu').numpy()
+        action = result['action'][0].detach().to('cpu').numpy()
         print('Inference latency:', time.time() - s)
     
     return action
@@ -89,15 +103,17 @@ def get_action(obs, policy, cfg):
 
 # %%
 def main():
-    """Test the PointCloudManager."""
-    rclpy.init()
+    NO_ACTION = False
 
-    NO_ACTION = True
+    ctrl_freq = 10.0 # Hz
+    ckpt_path = "/home/mingxi/mingxi_ws/handpi/data/data/outputs/2025.11.17/14.42.20_diff_voxel_block_lift_realworld_39_None/checkpoints/latest.ckpt" # TODO: Specify
 
     ### ---- Policy Setup ----- ###
     # Load the diffusion model
     payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
+    cfg.logging.resume = False
+    cfg.logging.mode = 'offline'  # Disable logging
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
     workspace: BaseWorkspace
@@ -117,6 +133,8 @@ def main():
     policy.reset()
 
     ### ---- Robot Setup ----- ###
+    """Test the PointCloudManager."""
+    rclpy.init()
     # Initialize robot
     robot = Robot(namespace="")
     robot.wait_until_ready()
@@ -126,6 +144,14 @@ def main():
     print("Going to home position...")
     robot.home()
     homing_pose = robot.end_effector_pose.copy()
+
+    robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+    robot.cartesian_controller_parameters_client.load_param_config(
+        file_path="config/control/default_cartesian_impedance.yaml"
+    )
+    time.sleep(2.0)
+
+    robot.move_to(position=np.array([0.5, 0., 0.3]), speed=0.15)
 
     # Initialize gripper
     gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
@@ -142,21 +168,26 @@ def main():
     ### ---- Point Cloud Setup ----- ###
     # Initialize robot filter
     config_path = Path(__file__).parent.parent / "config" / "camera_info.yaml"
+    print(f"debug: config_path = {config_path}")
     manager = PointCloudManager(str(config_path)) # Create point cloud manager
     robot_seg = RobotArmSegmentation() 
-    robot_seg.load_urdf("robot_filter/panda_description/urdf/panda_arm_hand.urdf")
+    robot_seg.load_urdf(toolbox_path + "/robot_filter/panda_description/urdf/panda_arm_hand.urdf")
+
+    pcd_processor = PointCloudProcessor()
 
     import threading # Spin in background thread to receive messages
     spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
+    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
     spin_thread.start()
 
 
     ### ---- Inference Loop ----- ###
-    n_steps_done = -1 # -1 means warm up
+    n_steps_done = 0 # -1 means warm up
     n_steps_todo = 40 # !! Number of steps to run
     prev_grasp_value = 0.0 # Initialize previous grasp value !! Check value
     t = 0.0
-    xxxxx
+    
+    print("Starting inference loop...\n====================\n====================")
     while True:
 
         if n_steps_done >= n_steps_todo:
@@ -166,54 +197,52 @@ def main():
 
         if pcd is None:
             print("No point cloud received yet.")
+            time.sleep(1.0)
             continue
-
-        # TODO? crop pcd using workspace
         
         # Get current joint state from robot
         joint_state = robot.joint_values
         filtered_pcd = robot_seg.segment(pcd, joint_state)
-
-        filtered_pcd_o3d = o3d.geometry.PointCloud()
-        filtered_pcd_o3d.points = o3d.utility.Vector3dVector(filtered_pcd[:, :3])
-        filtered_pcd_o3d.colors = o3d.utility.Vector3dVector(filtered_pcd[:, 3:])
-        
-        # o3d.visualization.draw_geometries(
-        #     [filtered_pcd_o3d],
-        #     window_name="Filtered Point Cloud",
-        #     width=800,
-        #     height=600
-        # )
-
+        end_effector_pose = robot.end_effector_pose
+        gripper_state = not gripper.is_open()
         # Prepare robot obs
-        obs_dict = franka_obs_to_diff_obs(filtered_pcd_o3d, joint_state)
+        eef_pose = np.concatenate([end_effector_pose.position, end_effector_pose.orientation.as_quat()], axis=0)
+        filtered_pcd = pcd_processor.get_render_pcd(filtered_pcd, eef_pose)
+        visualize_pcd(filtered_pcd)
+        obs_dict = franka_obs_to_diff_obs(filtered_pcd, end_effector_pose, gripper_state)
 
         if n_steps_done == -1: # Warm up policy
             # !! Update the obs input to the policy
-            warm_up_policy(obs=obs_dict, policy=policy)  # Replace None with actual observation if available
+            warm_up_policy(obs=obs_dict, policy=policy, cfg=cfg)  # Replace None with actual observation if available
             n_steps_done += 1
             continue
         
         # Get action from policy
         actions = get_action(obs=obs_dict, policy=policy, cfg=cfg)
-        print(f"Moving to pose {action}")
+        print(f"Policy inference: {actions}")
         for index, action in enumerate(actions):
+            
             x, y, z = action[:3]
             z = np.clip(z-0.02, 0.06, 0.6)
             target_pose.position = np.array([x, y, z])
-
+            
             if not NO_ACTION:
-                robot.set_target(pose=target_pose)
-                arm_rate.sleep()
+                # print(f"robo action {np.array([x, y, z])}")
+                robot.move_to(position=np.array([x, y, z]), speed=0.15)
+                # robot.set_target(pose=target_pose)
+                # arm_rate.sleep()
 
-            grasp_value = action[-1]
+            grasp_value = np.clip(action[-1], 0, 1)
             if grasp_value != prev_grasp_value:
                 print(f"Setting gripper to {grasp_value}")
                 gripper.set_target(1-grasp_value)
                 gripper_rate.sleep()
                 time.sleep(1.0)  # wait for gripper to move
             prev_grasp_value = grasp_value
-    
+            if index > 2:
+                break
+
+        manager.latest_pcd = None  # Clear latest point cloud to force getting a new one
         # t += 1.0 / ctrl_freq
         # i += 1
 
@@ -228,4 +257,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt received, shutting down...")
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+        try:
+            sys.exit(0)
+        except SystemExit:
+            pass
