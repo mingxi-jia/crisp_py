@@ -24,6 +24,7 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.policy.base_image_policy import BaseImagePolicy
 from diffusion_policy.real_world.real_inference_util import get_real_obs_dict
 from diffusion_policy.common.pytorch_util import dict_apply
+from diffusion_policy.model.common.rotation_transformer import RotationTransformer
 
 from scipy.spatial.transform import Rotation as R
 
@@ -32,16 +33,22 @@ import numpy as np
 import dill
 import hydra
 
-def visualize_pcd(pcd: np.ndarray):
+def visualize_pcd(pcd: np.ndarray, robot_pcd=None):
     """Visualize point cloud using Open3D.
 
     Args:
         pcd: Point cloud as a numpy array of shape (N, 6) where the first 3 columns are XYZ and the next 3 are RGB.
+        robot_pcd: Optional robot point cloud geometry to visualize alongside the scene.
     """
     pcd_o3d = o3d.geometry.PointCloud()
     pcd_o3d.points = o3d.utility.Vector3dVector(pcd[:, :3])
     pcd_o3d.colors = o3d.utility.Vector3dVector(pcd[:, 3:])
-    o3d.visualization.draw_geometries([pcd_o3d])
+
+    geometries = [pcd_o3d]
+    if robot_pcd is not None:
+        geometries.append(robot_pcd)
+
+    o3d.visualization.draw_geometries(geometries)
 
 def franka_obs_to_diff_obs(pcd, end_effector_pose, gripper_state):
     """Convert Franka observation to diffusion model observation format.
@@ -106,7 +113,7 @@ def main():
     NO_ACTION = False
 
     ctrl_freq = 10.0 # Hz
-    ckpt_path = "/home/mingxi/mingxi_ws/handpi/data/data/outputs/2025.11.17/14.42.20_diff_voxel_block_lift_realworld_39_None/checkpoints/latest.ckpt" # TODO: Specify
+    ckpt_path = "/home/mingxi/mingxi_ws/handpi/data/data/outputs/2025.11.19/12.03.00_diff_voxel_block_lift_realworld_39_None/checkpoints/latest.ckpt" # TODO: Specify
 
     ### ---- Policy Setup ----- ###
     # Load the diffusion model
@@ -131,6 +138,8 @@ def main():
     n_action_steps = 8
     policy.n_action_steps = n_action_steps
     policy.reset()
+    rotation_transformer = RotationTransformer(
+            from_rep='rotation_6d', to_rep='matrix')
 
     ### ---- Robot Setup ----- ###
     """Test the PointCloudManager."""
@@ -150,7 +159,9 @@ def main():
         file_path="config/control/default_cartesian_impedance.yaml"
     )
     time.sleep(2.0)
+    
 
+    print("Going to start position...")
     robot.move_to(position=np.array([0.5, 0., 0.3]), speed=0.15)
 
     # Initialize gripper
@@ -170,14 +181,19 @@ def main():
     config_path = Path(__file__).parent.parent / "config" / "camera_info.yaml"
     print(f"debug: config_path = {config_path}")
     manager = PointCloudManager(str(config_path)) # Create point cloud manager
-    robot_seg = RobotArmSegmentation() 
-    robot_seg.load_urdf(toolbox_path + "/robot_filter/panda_description/urdf/panda_arm_hand.urdf")
+
+    # Define per-link thresholds for adaptive filtering
+    # Stricter thresholds for fingers, looser for arm body
+
+    robot_seg = RobotArmSegmentation()
+    robot_seg.load_urdf(toolbox_path + "/robot_filter/panda_description/urdf/panda_arm_hand_finray.urdf")
+    # robot_seg.base_pose = np.array([0.1, 0, 0])
 
     pcd_processor = PointCloudProcessor()
 
     import threading # Spin in background thread to receive messages
-    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
-    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
+    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
+    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
     spin_thread.start()
 
 
@@ -192,23 +208,52 @@ def main():
 
         if n_steps_done >= n_steps_todo:
             break
+    
+        # Get current joint state from robot
+        joint_state = robot.joint_values
+        gripper_val = gripper.value
+        print(f"gripper_val: {gripper_val}")
+        joint_state = np.concatenate([joint_state, [0.055 * gripper_val]])
+        # Use adaptive threshold segmentation to filter robot from point cloud
+        # filtered_pcd = pcd # Debug: Check misalignment
+        end_effector_pose = robot.end_effector_pose
+        gripper_state = not gripper.is_open()
+
+        # Generate robot point cloud for visualization
+        joint_names = [j.name for j in robot_seg.robot_urdf.actuated_joints]
+        joint_angles = dict(zip(joint_names, joint_state))
+        robot_mesh_dict = robot_seg.robot_urdf.visual_trimesh_fk(cfg=joint_angles)
+
+        # Sample robot points
+        sampled_points = []
+        for mesh, pose in robot_mesh_dict.items():
+            transformed = mesh.copy()
+            transformed.apply_transform(pose)
+            transformed.apply_transform(robot_seg.T_world_urdf)
+            sampled_points.append(transformed.sample(2*2500))
+
+        robot_points = np.vstack(sampled_points)
+        robot_pcd = o3d.geometry.PointCloud()
+        robot_pcd.points = o3d.utility.Vector3dVector(robot_points)
+        robot_pcd.paint_uniform_color([0.75, 0.75, 0.75])  # Grey color
+
+        # Prepare robot obs
+        eef_pose = np.concatenate([end_effector_pose.position, end_effector_pose.orientation.as_quat()], axis=0)
+
         pcd = manager.get_latest_pointcloud()
-
-
         if pcd is None:
             print("No point cloud received yet.")
             time.sleep(1.0)
             continue
-        
-        # Get current joint state from robot
-        joint_state = robot.joint_values
         filtered_pcd = robot_seg.segment(pcd, joint_state)
-        end_effector_pose = robot.end_effector_pose
-        gripper_state = not gripper.is_open()
-        # Prepare robot obs
-        eef_pose = np.concatenate([end_effector_pose.position, end_effector_pose.orientation.as_quat()], axis=0)
         filtered_pcd = pcd_processor.get_render_pcd(filtered_pcd, eef_pose)
-        visualize_pcd(filtered_pcd)
+
+        pcd_o3d = o3d.geometry.PointCloud()
+        pcd_o3d.points = o3d.utility.Vector3dVector(filtered_pcd[:, :3])
+        pcd_o3d.colors = o3d.utility.Vector3dVector(filtered_pcd[:, 3:])
+        o3d.visualization.draw_geometries([pcd_o3d, robot_pcd])
+        # o3d.visualization.draw_geometries([pcd_o3d])
+
         obs_dict = franka_obs_to_diff_obs(filtered_pcd, end_effector_pose, gripper_state)
 
         if n_steps_done == -1: # Warm up policy
@@ -217,20 +262,43 @@ def main():
             n_steps_done += 1
             continue
         
+        # Visualize current end effector euler rotation
+        current_euler = end_effector_pose.orientation.as_euler('XYZ')
+
         # Get action from policy
         actions = get_action(obs=obs_dict, policy=policy, cfg=cfg)
         print(f"Policy inference: {actions}")
         for index, action in enumerate(actions):
             
+            print(action.shape)
             x, y, z = action[:3]
-            z = np.clip(z-0.02, 0.06, 0.6)
-            target_pose.position = np.array([x, y, z])
+            rot6d = action[3:9]
+            rotmat = rotation_transformer.forward(rot6d.reshape(1, 6))
             
+            # # Create coordinate frame at end effector to visualize orientation
+            # eef_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+            # eef_transform = np.eye(4)
+            # eef_transform[:3, :3] = rotmat
+            # eef_transform[:3, 3] = np.array([x, y, z])
+            # eef_frame.transform(eef_transform)
+
+            # # Visualize filtered pcd with robot model and EEF frame
+            # pcd_o3d = o3d.geometry.PointCloud()
+            # pcd_o3d.points = o3d.utility.Vector3dVector(filtered_pcd[:, :3])
+            # pcd_o3d.colors = o3d.utility.Vector3dVector(filtered_pcd[:, 3:])
+            # o3d.visualization.draw_geometries([pcd_o3d, robot_pcd, eef_frame])
+            # o3d.visualization.draw_geometries([pcd_o3d])
+
+            z = np.clip(z, 0.06+0.02, 0.6)
+            target_pose.position = np.array([x, y, z])
+            print(rotmat.shape)
+            target_pose.orientation = R.from_matrix(rotmat[0])
+            time.sleep(0.1)
             if not NO_ACTION:
-                # print(f"robo action {np.array([x, y, z])}")
-                robot.move_to(position=np.array([x, y, z]), speed=0.15)
-                # robot.set_target(pose=target_pose)
-                # arm_rate.sleep()
+                print(f"robo action {np.array([x, y, z])}")
+                # robot.move_to(position=np.array([x, y, z]), speed=0.15)
+                robot.set_target(pose=target_pose)
+                arm_rate.sleep()
 
             grasp_value = np.clip(action[-1], 0, 1)
             if grasp_value != prev_grasp_value:

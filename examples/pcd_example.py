@@ -33,7 +33,8 @@ def main():
 
     # Get config path
     config_path = Path(__file__).parent.parent / "config" / "camera_info.yaml"
-
+    print(f"debug: config_path = {config_path}")
+    
     # Create point cloud manager
     manager = PointCloudManager(str(config_path))
 
@@ -43,7 +44,8 @@ def main():
 
     # Spin in background thread to receive messages
     import threading
-    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
+    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
+    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
     spin_thread.start()
 
     # Wait and visualize
