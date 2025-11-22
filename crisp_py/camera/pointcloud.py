@@ -21,6 +21,8 @@ class PointCloudManager(Node):
     def __init__(self, config_path: str, downsample: int = 2):
         super().__init__("point_cloud_manager")
         self.bridge = CvBridge()
+        self.rgb_images = []
+        self.depth_images = []
         self.latest_pcd = None
         self.downsample = downsample  # Downsample factor for faster processing
         self.callback_count = 0
@@ -112,44 +114,16 @@ class PointCloudManager(Node):
         """Process synchronized RGB-D images from all cameras."""
         try:
             # Convert ROS images to numpy
-            rgb_images = [
+            self.rgb_images = [
                 self.bridge.imgmsg_to_cv2(img, "rgb8")
                 for img in [rgb1, rgb2, rgb3]
             ]
-            depth_images = [
+            self.depth_images = [
                 self.bridge.imgmsg_to_cv2(img, "16UC1")
                 for img in [depth1, depth2, depth3]
             ]
 
-            # Process each camera
-            all_points = []
-            all_colors = []
-
-            for i, (rgb, depth) in enumerate(zip(rgb_images, depth_images), 1):
-                cam_name = f"cam{i}"
-                cam_params = self.cam_params[cam_name]
-                R, t = self.transforms[cam_name]
-
-                # Convert to point cloud
-                points, colors = self.rgbd_to_pointcloud(rgb, depth, cam_params)
-
-                # Transform to robot frame
-                points = self.transform_pointcloud(points, R, t)
-
-                all_points.append(points)
-                all_colors.append(colors)
-
-            # Merge point clouds
-            merged_points = np.vstack(all_points)
-            merged_colors = np.vstack(all_colors)
-
-            # Create Open3D point cloud
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(merged_points)
-            pcd.colors = o3d.utility.Vector3dVector(merged_colors)
-
-            self.latest_pcd = np.concatenate([merged_points, merged_colors], axis=1)
-
+            
             # Log less frequently to reduce overhead
             self.callback_count += 1
             # if self.callback_count % 10 == 0:
@@ -160,7 +134,37 @@ class PointCloudManager(Node):
 
     def get_latest_pointcloud(self):
         """Return the latest merged point cloud."""
-        return self.latest_pcd
+        self.rgb_images = []
+        self.depth_images = []
+        while self.rgb_images == [] or self.depth_images == []:
+            time.sleep(0.01)  # Wait for first callback
+            print("No point cloud received yet.")
+
+        # Process each camera
+        all_points = []
+        all_colors = []
+
+        for i, (rgb, depth) in enumerate(zip(self.rgb_images, self.depth_images), 1):
+            cam_name = f"cam{i}"
+            cam_params = self.cam_params[cam_name]
+            R, t = self.transforms[cam_name]
+
+            # Convert to point cloud
+            points, colors = self.rgbd_to_pointcloud(rgb, depth, cam_params)
+
+            # Transform to robot frame
+            points = self.transform_pointcloud(points, R, t)
+
+            all_points.append(points)
+            all_colors.append(colors)
+
+        # Merge point clouds
+        merged_points = np.vstack(all_points)
+        merged_colors = np.vstack(all_colors)
+
+        latest_pcd = np.concatenate([merged_points, merged_colors], axis=1)
+
+        return latest_pcd
 
 
 # %%
