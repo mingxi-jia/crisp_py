@@ -107,7 +107,9 @@ def process_images():
 
         # Process images
         t0 = time.time()
-        processed_rgb, processed_depth = pcd_processor.get_policy_images(rgb_dict, depth_dict)
+        processed_rgb, processed_depth, is_contact = pcd_processor.get_policy_images(rgb_dict, depth_dict)
+        # processed_rgb, processed_depth = pcd_processor.get_policy_images(rgb_dict, depth_dict)
+
         t_process = time.time() - t0
 
         # Encode results as base64

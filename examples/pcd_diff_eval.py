@@ -193,7 +193,7 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
     ih_rgb, ih_depth = obs_manager.get_latest_rgbd(inhand_cam)
     rgb_dict, depth_dict = {inhand_cam: ih_rgb}, {inhand_cam: ih_depth}
     # print(rgb_dict[inhand_cam].max())
-    rgb_dict, depth_dict = pcd_processor.get_policy_images(rgb_dict, depth_dict)
+    rgb_dict, depth_dict, is_contact = pcd_processor.get_policy_images(rgb_dict, depth_dict)
     t_process_images = time.time() - t0
     print(f"Time to process images: {t_process_images*1000:6.1f} ms")
     print(rgb_dict[inhand_cam].max())
@@ -210,9 +210,9 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
 
     # Create observation dictionary
     obs = {
-        'pcd': pcd, # !!! Check the format, diffusion expects [1024, 6]
+        # 'pcd': pcd, # !!! Check the format, diffusion expects [1024, 6]
         'render_pcd': render_pcd,
-        'robot0_eye_in_hand_image': np.transpose(rgb_dict[inhand_cam], (2, 0, 1)) / 255.0,  
+        # 'robot0_eye_in_hand_image': np.transpose(rgb_dict[inhand_cam], (2, 0, 1)) / 255.0,  
         'robot0_eef_pos': robot0_eef_pos.astype(np.float32), 
         'robot0_eef_quat': robot0_eef_quat.astype(np.float32),
         'robot0_gripper_qpos': robot0_gripper_qpos.astype(np.float32),
@@ -312,7 +312,7 @@ def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat):
 def main():
 
     ctrl_freq = 10.0 # Hz
-    ckpt_path = "/home/mingxi/Downloads/epoch=0040-val_loss=0.008.ckpt"
+    ckpt_path = "/home/mingxi/Downloads/epoch=0080-val_loss=0.011.ckpt"
     # ckpt_path = "/home/mingxi/mingxi_ws/handpi/data/data/outputs/2025.11.20/19.43.13_diff_voxel_lift_block_realworld_38_None/checkpoints/epoch=0110-val_loss=0.032.ckpt"
 
     ### ---- Policy Setup ----- ###
@@ -414,7 +414,7 @@ def main():
         joint_state = joint_state_subscriber.joint_values
         gripper_val = gripper.value
         # print(f"gripper_val: {gripper_val}")
-        joint_state = np.concatenate([joint_state, [gripper_norm_const * gripper_val]])
+        # joint_state = np.concatenate([joint_state, [gripper_norm_const * gripper_val]])
         gripper_state = not gripper.is_open()
 
         # Prepare robot obs

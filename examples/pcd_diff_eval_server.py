@@ -86,7 +86,7 @@ class JointStateSubscriber:
     @property
     def joint_values(self) -> np.ndarray:
         """Get joint values in the order specified by joint_names."""
-        return self.joint_array[1:]
+        return self.joint_array
 
     @property
     def is_ready(self) -> bool:
@@ -198,6 +198,9 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
     t_process_images = time.time() - t0
     print(f"Time to process images (total): {t_process_images*1000:6.1f} ms")
     print(rgb_dict[inhand_cam].max())
+    # import matplotlib.pyplot as plt
+    # plt.imshow(rgb_dict[inhand_cam].astype(np.uint8))
+    # plt.show()
 
     robot0_eef_pos = eef_pose[:3]
     robot0_eef_quat = eef_pose[3:]  # Assuming quaternion is in (x, y, z, w) format
@@ -206,9 +209,9 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
     # Visualize for debugging
     if visualize:
         pcd_visualize = o3d.geometry.PointCloud()
-        pcd_visualize.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
-        pcd_visualize.colors = o3d.utility.Vector3dVector(render_pcd[:, 3:])
-        o3d.visualization.draw_geometries([pcd_visualize, robo_pcd])
+        pcd_visualize.points = o3d.utility.Vector3dVector(pcd[:, :3])
+        pcd_visualize.colors = o3d.utility.Vector3dVector(pcd[:, 3:])
+        o3d.visualization.draw_geometries([pcd_visualize])
 
     # Create observation dictionary
     obs = {
@@ -219,6 +222,7 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
         'robot0_eef_quat': robot0_eef_quat.astype(np.float32),
         'robot0_gripper_qpos': robot0_gripper_qpos.astype(np.float32),
     }
+
 
     return obs
 
@@ -434,9 +438,10 @@ def get_action(obs, policy_client):
     t0 = time.time()
     action = policy_client.predict_action(obs)
     t_total = time.time() - t0
-
+    print(action.shape)
     print(f"  [get_action total]:  {t_total*1000:6.1f} ms")
-
+    for i in range(8):
+        print(f"{action[i, 0]:.4f}\t{action[i, 1]:.4f}\t{action[i, 2]:.4f}")
     return action
 
 def get_pose_from_robot(robot_pose: Pose):
@@ -463,7 +468,10 @@ def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat):
     rot6d = action[3:9]
     rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))
 
-    action[2] = np.clip(action[2], 0.0, 0.6)
+    # hardcode safety limits
+    action[0] = np.clip(action[0], 0.3, 0.8)
+    action[1] = np.clip(action[1], -0.35, 0.35)
+    action[2] = np.clip(action[2], 0.02, 0.6)
     finger_pose = np.eye(4)
     finger_pose[:3, :3] = rotmat[0]
     finger_pose[:3, 3] = action[:3]
@@ -562,9 +570,9 @@ def main():
 
         # Prepare robot obs - get joint state from ROS2 subscriber
         joint_state = joint_state_subscriber.joint_values
+        print(f"Joint state: {joint_state.shape}")
         gripper_val = gripper.value
         # print(f"gripper_val: {gripper_val}")
-        joint_state = np.concatenate([joint_state, [gripper_norm_const * gripper_val]])
         gripper_state = not gripper.is_open()
 
         # Prepare robot obs
@@ -579,7 +587,7 @@ def main():
 
         # Get action from policy server
         t0 = time.time()
-        actions = get_action(obs=obs_dict, policy_client=policy_client)
+        actions = get_action(obs=obs_dict, policy_client=policy_client)[:8]
         t_inference = time.time() - t0
 
         # print(f"Policy inference: {actions}")
