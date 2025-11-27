@@ -432,32 +432,44 @@ def main():
             warm_up_policy(obs=obs_dict, policy=policy, cfg=cfg)  # Replace None with actual observation if available
             n_steps_done += 1
             continue
-
+        times = []
         # Get action from policy
+        for _ in range(10):
+            torch.cuda.synchronize()
+            t0 = time.time()
+            actions = get_action(obs=obs_dict, policy=policy, cfg=cfg)
+
+            torch.cuda.synchronize()
+            times.append(time.time() - t0)
+        
+        print("mean:", sum(times)/len(times), "min:", min(times), "max:", max(times))
+        print(times)
+        print("=========")
+
         t0 = time.time()
-        actions = get_action(obs=obs_dict, policy=policy, cfg=cfg)
+
         t_inference = time.time() - t0
 
         # print(f"Policy inference: {actions}")
         # visualize_pcd_and_actions(pcd=obs_dict['pcd'], actions=actions)
 
         t0 = time.time()
-        for action in actions:
-            action = convert_action_from_fingertip_to_gripper(action, rotation_transformer)
+        # for action in actions:
+        #     action = convert_action_from_fingertip_to_gripper(action, rotation_transformer)
 
-            target_pose.position = action[:3]
-            target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
+        #     target_pose.position = action[:3]
+        #     target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
 
-            # robot.move_to(position=np.array([x, y, z]), speed=0.15)
-            robot.set_target(pose=target_pose)
-            arm_rate.sleep()
+        #     # robot.move_to(position=np.array([x, y, z]), speed=0.15)
+        #     robot.set_target(pose=target_pose)
+        #     arm_rate.sleep()
 
-            grasp_value = np.round(np.clip(action[-1], 0, 1))
-            if grasp_value != prev_grasp_value:
-                gripper.set_target(1-grasp_value)
-                gripper_rate.sleep()
-                time.sleep(1.0)  # wait for gripper to move (due to franka driver limitation)
-            prev_grasp_value = grasp_value
+        #     grasp_value = np.round(np.clip(action[-1], 0, 1))
+        #     if grasp_value != prev_grasp_value:
+        #         gripper.set_target(1-grasp_value)
+        #         gripper_rate.sleep()
+        #         time.sleep(1.0)  # wait for gripper to move (due to franka driver limitation)
+        #     prev_grasp_value = grasp_value
         t_execution = time.time() - t0
 
         iter_total = time.time() - iter_start

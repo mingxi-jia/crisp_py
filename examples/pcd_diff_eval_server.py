@@ -1,4 +1,4 @@
-"""A ROS2-based point cloud processing example."""
+"""A ROS2-based point cloud processing example with policy server."""
 
 # %%
 import os
@@ -15,10 +15,6 @@ from sensor_msgs.msg import JointState
 import sys
 toolbox_path = '/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox'
 sys.path.append(toolbox_path)
-from robot_filter.arm_segmentor import RobotArmSegmentation
-
-from utils.pcd_utils import render_pcd_from_pose
-from hand.trajectory_loader import ObservationProcessor
 
 # Diffusion Imports / inits
 sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
@@ -34,6 +30,8 @@ import torch
 import numpy as np
 import dill
 import hydra
+import requests
+import base64
 
 
 finger_hand_offset = 0.06  # Distance from finger tip to gripper base along z-axis
@@ -139,7 +137,7 @@ def visualize_robot_pcd(raw_pcd, robot_seg, joint_state):
     return robot_pcd
 
 def visualize_pcd_and_actions(pcd, actions, robot_pcd=None):
-    
+
     action_frames = []
     for action in actions:
         x, y, z = action[:3]
@@ -165,13 +163,17 @@ def visualize_pcd_and_actions(pcd, actions, robot_pcd=None):
     else:
         o3d.visualization.draw_geometries([pcd_o3d] + action_frames)
 
-def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_state, pcd_processor, joint_state):
+def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_state, pcd_client, joint_state, visualize=False):
     """Convert Franka observation to diffusion model observation format.
-    
+
     Args:
-        pcd (np.ndarray): The input point cloud.
-        end_effector_pose (np.ndarray): The robot's end effector pose.
-    
+        obs_manager: Point cloud manager for getting raw point clouds
+        eef_pose: End effector pose
+        gripper_state: Gripper state
+        pcd_client: PcdProcessingClient for processing point clouds
+        joint_state: Joint state array
+        visualize: Whether to visualize
+
     Returns:
         dict: A dictionary containing the formatted observation.
     """
@@ -180,94 +182,260 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
     t_latest_pcd = time.time() - t0
     print(f"Time to get latest pcd: {t_latest_pcd*1000:6.1f} ms")
 
-    # robo_pcd = visualize_robot_pcd(pcd, pcd_processor.robot_filter, joint_state)
+    # if visualize:
+    #     robo_pcd = visualize_robot_pcd(pcd, pcd_processor.robot_filter, joint_state)
 
     t0 = time.time()
-    pcd, render_pcd = pcd_processor.get_policy_obs(pcd, eef_pose, joint_state)
-    # print(pcd.shape)
+    pcd, render_pcd = pcd_client.process_pcd(pcd, eef_pose, joint_state)
     t_process_pcd = time.time() - t0
-    print(f"Time to process pcd: {t_process_pcd*1000:6.1f} ms")
+    print(f"Time to process pcd (total): {t_process_pcd*1000:6.1f} ms")
 
     t0 = time.time()
     inhand_cam = 'cam4'
     ih_rgb, ih_depth = obs_manager.get_latest_rgbd(inhand_cam)
     rgb_dict, depth_dict = {inhand_cam: ih_rgb}, {inhand_cam: ih_depth}
-    # print(rgb_dict[inhand_cam].max())
-    rgb_dict, depth_dict = pcd_processor.get_policy_images(rgb_dict, depth_dict)
+    rgb_dict, depth_dict = pcd_client.process_images(rgb_dict, depth_dict)
     t_process_images = time.time() - t0
-    print(f"Time to process images: {t_process_images*1000:6.1f} ms")
+    print(f"Time to process images (total): {t_process_images*1000:6.1f} ms")
     print(rgb_dict[inhand_cam].max())
-    
+
     robot0_eef_pos = eef_pose[:3]
-    robot0_eef_quat = eef_pose[3:]  # Assuming quaternion is in (x, y, z, w) format   
+    robot0_eef_quat = eef_pose[3:]  # Assuming quaternion is in (x, y, z, w) format
     robot0_gripper_qpos = np.array([gripper_state, gripper_state], dtype=int) # !!! Check
-    
+
     # Visualize for debugging
-    # pcd_visualize = o3d.geometry.PointCloud()
-    # pcd_visualize.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
-    # pcd_visualize.colors = o3d.utility.Vector3dVector(render_pcd[:, 3:])
-    # o3d.visualization.draw_geometries([pcd_visualize, robo_pcd])
+    if visualize:
+        pcd_visualize = o3d.geometry.PointCloud()
+        pcd_visualize.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
+        pcd_visualize.colors = o3d.utility.Vector3dVector(render_pcd[:, 3:])
+        o3d.visualization.draw_geometries([pcd_visualize, robo_pcd])
 
     # Create observation dictionary
     obs = {
         'pcd': pcd, # !!! Check the format, diffusion expects [1024, 6]
         'render_pcd': render_pcd,
-        'robot0_eye_in_hand_image': np.transpose(rgb_dict[inhand_cam], (2, 0, 1)) / 255.0,  
-        'robot0_eef_pos': robot0_eef_pos.astype(np.float32), 
+        'robot0_eye_in_hand_image': np.transpose(rgb_dict[inhand_cam], (2, 0, 1)) / 255.0,
+        'robot0_eef_pos': robot0_eef_pos.astype(np.float32),
         'robot0_eef_quat': robot0_eef_quat.astype(np.float32),
         'robot0_gripper_qpos': robot0_gripper_qpos.astype(np.float32),
     }
 
     return obs
 
-# !! Not sure how necessary this is 
-def warm_up_policy(obs, policy, cfg):
-    with torch.no_grad():
-        policy.reset()
-        device = torch.device('cuda')
-        obs_dict_np = get_real_obs_dict(
-            env_obs=obs, shape_meta=cfg.task.shape_meta)
-        obs_dict = dict_apply(obs_dict_np, 
-            lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
-        result = policy.predict_action(obs_dict)
-        action = result['action'][0].detach().to('cpu').numpy()
-        assert action.shape[-1] == 2
-        del result
+class PolicyClient:
+    """Client for communicating with the policy server."""
 
+    def __init__(self, server_url: str = "http://localhost:5000"):
+        self.server_url = server_url
+        self._check_health()
 
-def get_action(obs, policy, cfg):
-    with torch.no_grad():
-        device = torch.device('cuda')
+    def _check_health(self):
+        """Check if server is healthy."""
+        try:
+            response = requests.get(f"{self.server_url}/health", timeout=5)
+            if response.status_code == 200:
+                print("Connected to policy server successfully")
+            else:
+                raise ConnectionError("Policy server unhealthy")
+        except Exception as e:
+            raise ConnectionError(f"Cannot connect to policy server: {e}")
 
-        # Time obs_dict preparation
-        t0 = time.time()
-        # obs_dict_np = get_real_obs_dict(
-        #     env_obs=obs, shape_meta=cfg.task.shape_meta)
-        t_obs_dict = time.time() - t0
+    def predict_action(self, obs_dict: dict) -> np.ndarray:
+        """Get action prediction from server.
 
-        # Time tensor conversion and GPU transfer
-        t0 = time.time()
-        obs_dict = dict_apply(obs,
-            lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
-        torch.cuda.synchronize()  # Ensure GPU transfer is complete
-        t_to_gpu = time.time() - t0
+        Args:
+            obs_dict: Dictionary of observations
 
-        # Time policy inference
-        t0 = time.time()
-        result = policy.predict_action(obs_dict)
-        torch.cuda.synchronize()  # Ensure inference is complete
-        t_predict = time.time() - t0
+        Returns:
+            Action array
+        """
+        # Encode observations as base64
+        data = {}
+        for key, value in obs_dict.items():
+            array_bytes = value.tobytes()
+            array_b64 = base64.b64encode(array_bytes).decode('utf-8')
+            data[key] = {
+                'data': array_b64,
+                'dtype': str(value.dtype),
+                'shape': value.shape
+            }
 
-        # Time result transfer back to CPU
-        t0 = time.time()
-        action = result['action'][0].detach().to('cpu').numpy()
-        t_to_cpu = time.time() - t0
+        # Send request
+        response = requests.post(
+            f"{self.server_url}/predict",
+            json=data,
+            timeout=30
+        )
 
-        print(f"  [get_action breakdown]")
-        print(f"    obs_dict prep:   {t_obs_dict*1000:6.1f} ms")
-        print(f"    to GPU:          {t_to_gpu*1000:6.1f} ms")
-        print(f"    predict_action:  {t_predict*1000:6.1f} ms")
-        print(f"    to CPU:          {t_to_cpu*1000:6.1f} ms")
+        if response.status_code != 200:
+            raise RuntimeError(f"Server error: {response.json()}")
+
+        result = response.json()
+
+        # Decode action
+        action_bytes = base64.b64decode(result['action']['data'])
+        action = np.frombuffer(action_bytes, dtype=result['action']['dtype'])
+        action = action.reshape(result['action']['shape'])
+
+        # Print timing info
+        timing = result['timing']
+        print(f"  [Policy server timing]")
+        print(f"    to GPU:          {timing['to_gpu']:6.1f} ms")
+        print(f"    predict_action:  {timing['predict']:6.1f} ms")
+        print(f"    to CPU:          {timing['to_cpu']:6.1f} ms")
+
+        return action
+
+    def reset(self):
+        """Reset the policy."""
+        response = requests.post(f"{self.server_url}/reset", timeout=5)
+        if response.status_code != 200:
+            raise RuntimeError(f"Server error: {response.json()}")
+
+class PcdProcessingClient:
+    """Client for communicating with the point cloud processing server."""
+
+    def __init__(self, server_url: str = "http://localhost:5001"):
+        self.server_url = server_url
+        self._check_health()
+
+    def _check_health(self):
+        """Check if server is healthy."""
+        try:
+            response = requests.get(f"{self.server_url}/health", timeout=5)
+            if response.status_code == 200:
+                print("Connected to PCD processing server successfully")
+            else:
+                raise ConnectionError("PCD processing server unhealthy")
+        except Exception as e:
+            raise ConnectionError(f"Cannot connect to PCD processing server: {e}")
+
+    def process_pcd(self, pcd: np.ndarray, eef_pose: np.ndarray, joint_state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Process point cloud on the server.
+
+        Args:
+            pcd: Raw point cloud array
+            eef_pose: End-effector pose
+            joint_state: Joint state array
+
+        Returns:
+            Tuple of (processed_pcd, render_pcd)
+        """
+        # Encode inputs as base64
+        data = {
+            'pcd': {
+                'data': base64.b64encode(pcd.tobytes()).decode('utf-8'),
+                'dtype': str(pcd.dtype),
+                'shape': pcd.shape
+            },
+            'eef_pose': {
+                'data': base64.b64encode(eef_pose.tobytes()).decode('utf-8'),
+                'dtype': str(eef_pose.dtype),
+                'shape': eef_pose.shape
+            },
+            'joint_state': {
+                'data': base64.b64encode(joint_state.tobytes()).decode('utf-8'),
+                'dtype': str(joint_state.dtype),
+                'shape': joint_state.shape
+            }
+        }
+
+        # Send request
+        response = requests.post(
+            f"{self.server_url}/process_pcd",
+            json=data,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Server error: {response.json()}")
+
+        result = response.json()
+
+        # Decode processed point clouds
+        processed_pcd_bytes = base64.b64decode(result['processed_pcd']['data'])
+        processed_pcd = np.frombuffer(processed_pcd_bytes, dtype=result['processed_pcd']['dtype'])
+        processed_pcd = processed_pcd.reshape(result['processed_pcd']['shape'])
+
+        render_pcd_bytes = base64.b64decode(result['render_pcd']['data'])
+        render_pcd = np.frombuffer(render_pcd_bytes, dtype=result['render_pcd']['dtype'])
+        render_pcd = render_pcd.reshape(result['render_pcd']['shape'])
+
+        # Print timing info
+        timing = result['timing']
+        print(f"  [PCD processing server timing]")
+        print(f"    process:         {timing['process']:6.1f} ms")
+
+        return processed_pcd, render_pcd
+
+    def process_images(self, rgb_dict: dict, depth_dict: dict) -> tuple[dict, dict]:
+        """Process RGB and depth images on the server.
+
+        Args:
+            rgb_dict: Dictionary of RGB images
+            depth_dict: Dictionary of depth images
+
+        Returns:
+            Tuple of (processed_rgb_dict, processed_depth_dict)
+        """
+        # Encode inputs as base64
+        data = {
+            'rgb_dict': {},
+            'depth_dict': {}
+        }
+
+        for cam_name, img in rgb_dict.items():
+            data['rgb_dict'][cam_name] = {
+                'data': base64.b64encode(img.tobytes()).decode('utf-8'),
+                'dtype': str(img.dtype),
+                'shape': img.shape
+            }
+
+        for cam_name, img in depth_dict.items():
+            data['depth_dict'][cam_name] = {
+                'data': base64.b64encode(img.tobytes()).decode('utf-8'),
+                'dtype': str(img.dtype),
+                'shape': img.shape
+            }
+
+        # Send request
+        response = requests.post(
+            f"{self.server_url}/process_images",
+            json=data,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Server error: {response.json()}")
+
+        result = response.json()
+
+        # Decode processed images
+        processed_rgb = {}
+        processed_depth = {}
+
+        for cam_name, img_data in result['rgb_dict'].items():
+            img_bytes = base64.b64decode(img_data['data'])
+            processed_rgb[cam_name] = np.frombuffer(img_bytes, dtype=img_data['dtype']).reshape(img_data['shape'])
+
+        for cam_name, img_data in result['depth_dict'].items():
+            img_bytes = base64.b64decode(img_data['data'])
+            processed_depth[cam_name] = np.frombuffer(img_bytes, dtype=img_data['dtype']).reshape(img_data['shape'])
+
+        # Print timing info
+        timing = result['timing']
+        print(f"  [Image processing server timing]")
+        print(f"    process:         {timing['process']:6.1f} ms")
+
+        return processed_rgb, processed_depth
+
+def get_action(obs, policy_client):
+    """Get action from policy server."""
+    t0 = time.time()
+    action = policy_client.predict_action(obs)
+    t_total = time.time() - t0
+
+    print(f"  [get_action total]:  {t_total*1000:6.1f} ms")
 
     return action
 
@@ -288,6 +456,10 @@ def get_pose_from_robot(robot_pose: Pose):
 
 def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat):
     # print(f"Original action: {action}")
+    # Ensure action is writable (make a copy if needed)
+    if not action.flags.writeable:
+        action = action.copy()
+
     rot6d = action[3:9]
     rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))
 
@@ -312,32 +484,12 @@ def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat):
 def main():
 
     ctrl_freq = 10.0 # Hz
-    ckpt_path = "/home/mingxi/Downloads/epoch=0040-val_loss=0.008.ckpt"
-    # ckpt_path = "/home/mingxi/mingxi_ws/handpi/data/data/outputs/2025.11.20/19.43.13_diff_voxel_lift_block_realworld_38_None/checkpoints/epoch=0110-val_loss=0.032.ckpt"
+    policy_server_port = 5000
+    pcd_server_port = 5001
 
-    ### ---- Policy Setup ----- ###
-    # Load the diffusion model
-    payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
-    cfg = payload['cfg']
-    cfg.logging.resume = False
-    cfg.logging.mode = 'offline'  # Disable logging
-    cfg.real_robot_eval = True  # Enable real robot eval mode
-    cls = hydra.utils.get_class(cfg._target_)
-    workspace = cls(cfg)
-    workspace: BaseWorkspace
-    workspace.load_payload(payload, exclude_keys=None, include_keys=None)
-
-    # Setup the diffusion model
-    delta_action = False
-    policy: BaseImagePolicy
-    policy = workspace.model # !!! didn't include use ema
-    device = torch.device('cuda')
-    policy.eval()
-    policy.to(device)
-    policy.num_inference_steps = 20 
-    n_action_steps = 8
-    policy.n_action_steps = n_action_steps
-    policy.reset()
+    ### ---- Client Setup ----- ###
+    policy_client = PolicyClient(f"http://localhost:{policy_server_port}")
+    pcd_client = PcdProcessingClient(f"http://localhost:{pcd_server_port}")
     rotation_transformer = RotationTransformer(
             from_rep='rotation_6d', to_rep='matrix')
 
@@ -357,7 +509,7 @@ def main():
     robot.cartesian_controller_parameters_client.load_param_config(
         file_path="config/control/default_cartesian_impedance.yaml"
     )
-    
+
     print("Going to start position...")
     robot.move_to(position=home_position, speed=0.15)
 
@@ -378,18 +530,16 @@ def main():
     config_path = os.path.join(toolbox_path, "configs", "camera_info.yaml")
     manager = PointCloudManager(config_path) # Create point cloud manager
 
-    # robot_seg = RobotArmSegmentation(joint_thresholds=joint_thresholds, urdf_path=toolbox_path + "/robot_filter/panda_description/urdf/panda_arm_hand_finray.urdf")
-    # robot_seg.load_urdf(toolbox_path + "/robot_filter/panda_description/urdf/panda_arm_hand_finray.urdf")
-
-    pcd_processor = ObservationProcessor()
-
-    # Get joint names from the robot segmentor's URDF (sorted alphabetically)
-    joint_names = sorted([j.name for j in pcd_processor.robot_filter.robot_urdf.actuated_joints])
+    # Get joint names - we need to load the URDF temporarily to get the joint names
+    # This is only needed for the JointStateSubscriber
+    from robot_filter.arm_segmentor import RobotArmSegmentation
+    temp_robot_seg = RobotArmSegmentation()
+    joint_names = sorted([j.name for j in temp_robot_seg.robot_urdf.actuated_joints])
     joint_state_subscriber = JointStateSubscriber(manager, joint_names, topic="/joint_states")
 
     import threading # Spin in background thread to receive messages
-    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
-    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
+    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
+    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
     spin_thread.start()
 
     # Wait for joint states to be received
@@ -423,26 +573,22 @@ def main():
         eef_pose = get_pose_from_robot(robot.end_effector_pose)
 
         t0 = time.time()
-        obs_dict = franka_obs_to_diff_obs(manager, eef_pose, gripper_state, pcd_processor, joint_state)
-        # robot_pcd = visualize_robot_pcd(pcd, pcd_processor.robot_filter, joint_state)
+        obs_dict = franka_obs_to_diff_obs(manager, eef_pose, gripper_state, pcd_client, joint_state)
         t_pointcloud = time.time() - t0
+        print(f"Time to prepare observation: {t_pointcloud*1000:6.1f} ms")
 
-        if n_steps_done == -1: # Warm up policy
-            # !! Update the obs input to the policy
-            warm_up_policy(obs=obs_dict, policy=policy, cfg=cfg)  # Replace None with actual observation if available
-            n_steps_done += 1
-            continue
-
-        # Get action from policy
+        # Get action from policy server
         t0 = time.time()
-        actions = get_action(obs=obs_dict, policy=policy, cfg=cfg)
+        actions = get_action(obs=obs_dict, policy_client=policy_client)
         t_inference = time.time() - t0
 
         # print(f"Policy inference: {actions}")
         # visualize_pcd_and_actions(pcd=obs_dict['pcd'], actions=actions)
 
         t0 = time.time()
-        for action in actions:
+        for i, action in enumerate(actions):
+            # Make a copy since the array from server is read-only
+            action = action.copy()
             action = convert_action_from_fingertip_to_gripper(action, rotation_transformer)
 
             target_pose.position = action[:3]

@@ -24,8 +24,11 @@ class PointCloudManager(Node):
         self.rgb_images = []
         self.depth_images = []
         self.latest_pcd = None
+        self.inhand_image = None
+        self.inhand_depth = None
         self.downsample = downsample  # Downsample factor for faster processing
         self.callback_count = 0
+        fps = 20.0  # Expected camera FPS
 
         # Load camera parameters
         with open(config_path, "r") as f:
@@ -54,11 +57,15 @@ class PointCloudManager(Node):
             depth_sub = Subscriber(self, Image, f"/cam{i}/aligned_depth_to_color/image_raw", qos_profile=qos)
             self.rgb_subs.append(rgb_sub)
             self.depth_subs.append(depth_sub)
+        
+        self.inhand_rgb_sub = Subscriber(self, Image, f"/cam4/color/image_rect_raw", qos_profile=qos)
+        self.inhand_depth_sub = Subscriber(self, Image, f"/cam4/aligned_depth_to_color/image_raw", qos_profile=qos)
+        self.inhand_sub = [self.inhand_rgb_sub, self.inhand_depth_sub]
 
         # Synchronize all 6 topics with larger queue and more lenient timing
-        all_subs = self.rgb_subs + self.depth_subs
+        all_subs = self.rgb_subs + self.depth_subs + self.inhand_sub
         self.sync = ApproximateTimeSynchronizer(
-            all_subs, queue_size=100, slop=0.05
+            all_subs, queue_size=100, slop=1/fps
         )
         self.sync.registerCallback(self.sync_callback)
 
@@ -110,7 +117,7 @@ class PointCloudManager(Node):
         # Apply transformation: p_world = R * p_cam + t
         return (R @ points.T).T + t
 
-    def sync_callback(self, rgb1, rgb2, rgb3, depth1, depth2, depth3):
+    def sync_callback(self, rgb1, rgb2, rgb3, depth1, depth2, depth3, inhand_rgb, inhand_depth):
         """Process synchronized RGB-D images from all cameras."""
         try:
             # Convert ROS images to numpy
@@ -122,6 +129,8 @@ class PointCloudManager(Node):
                 self.bridge.imgmsg_to_cv2(img, "16UC1")
                 for img in [depth1, depth2, depth3]
             ]
+            self.inhand_image = self.bridge.imgmsg_to_cv2(inhand_rgb, "rgb8")
+            self.inhand_depth = self.bridge.imgmsg_to_cv2(inhand_depth, "16UC1")/1000.0
 
             
             # Log less frequently to reduce overhead
@@ -138,7 +147,7 @@ class PointCloudManager(Node):
         self.depth_images = []
         while self.rgb_images == [] or self.depth_images == []:
             time.sleep(0.01)  # Wait for first callback
-            print("No point cloud received yet.")
+            # print("No point celoud received yet.")
 
         # Process each camera
         all_points = []
@@ -166,6 +175,19 @@ class PointCloudManager(Node):
 
         return latest_pcd
 
+    def get_latest_rgbd(self, cam_name: str):
+        """Return the latest RGB image from specified camera."""
+        if cam_name == "cam4":
+            while (self.inhand_image is None) or (self.inhand_depth is None):
+                time.sleep(0.01)  # Wait for first callback
+                print("No in-hand RGB image received yet.")
+            return self.inhand_image, self.inhand_depth
+        else:
+            while self.rgb_images == [] or self.depth_images == []:
+                time.sleep(0.01)  # Wait for first callback
+                print("No RGB image received yet.")
+            name2idx = {"cam1": 0, "cam2": 1, "cam3": 2}
+            return self.rgb_images[name2idx[cam_name]], self.depth_images[name2idx[cam_name]]
 
 # %%
 def main():

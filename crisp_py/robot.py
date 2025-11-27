@@ -401,12 +401,19 @@ class Robot:
             self._current_joint = np.zeros(self.nq)
 
         # self.node.get_logger().info(f"Current joint state: {msg.name} {msg.position}", throttle_duration_sec=1.0)
+        
         for joint_name, joint_position in zip(msg.name, msg.position):
             if joint_name.removeprefix(self._prefix) not in self.config.joint_names:
                 continue
             self._current_joint[
                 self.config.joint_names.index(joint_name.removeprefix(self._prefix))
             ] = joint_position
+
+        # joint_names = msg.name
+        # joint_positions = msg.position
+        # sorted_indices = sorted(range(len(joint_names)), key=lambda i: joint_names[i])
+        # sorted_positions = [joint_positions[i] for i in sorted_indices]
+        # self._current_joint = np.array(sorted_positions, dtype=np.float32)
 
         if self._target_joint is None:
             self._target_joint = self._current_joint.copy()

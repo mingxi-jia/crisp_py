@@ -1,4 +1,4 @@
-"""A ROS2-based point cloud processing example."""
+"""A ROS2-based point cloud processing example with threaded policy inference."""
 
 # %%
 import os
@@ -34,6 +34,8 @@ import torch
 import numpy as np
 import dill
 import hydra
+import threading
+import queue
 
 
 finger_hand_offset = 0.06  # Distance from finger tip to gripper base along z-axis
@@ -139,7 +141,7 @@ def visualize_robot_pcd(raw_pcd, robot_seg, joint_state):
     return robot_pcd
 
 def visualize_pcd_and_actions(pcd, actions, robot_pcd=None):
-    
+
     action_frames = []
     for action in actions:
         x, y, z = action[:3]
@@ -167,11 +169,11 @@ def visualize_pcd_and_actions(pcd, actions, robot_pcd=None):
 
 def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_state, pcd_processor, joint_state):
     """Convert Franka observation to diffusion model observation format.
-    
+
     Args:
         pcd (np.ndarray): The input point cloud.
         end_effector_pose (np.ndarray): The robot's end effector pose.
-    
+
     Returns:
         dict: A dictionary containing the formatted observation.
     """
@@ -197,11 +199,11 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
     t_process_images = time.time() - t0
     print(f"Time to process images: {t_process_images*1000:6.1f} ms")
     print(rgb_dict[inhand_cam].max())
-    
+
     robot0_eef_pos = eef_pose[:3]
-    robot0_eef_quat = eef_pose[3:]  # Assuming quaternion is in (x, y, z, w) format   
+    robot0_eef_quat = eef_pose[3:]  # Assuming quaternion is in (x, y, z, w) format
     robot0_gripper_qpos = np.array([gripper_state, gripper_state], dtype=int) # !!! Check
-    
+
     # Visualize for debugging
     # pcd_visualize = o3d.geometry.PointCloud()
     # pcd_visualize.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
@@ -212,22 +214,22 @@ def franka_obs_to_diff_obs(obs_manager: PointCloudManager, eef_pose, gripper_sta
     obs = {
         'pcd': pcd, # !!! Check the format, diffusion expects [1024, 6]
         'render_pcd': render_pcd,
-        'robot0_eye_in_hand_image': np.transpose(rgb_dict[inhand_cam], (2, 0, 1)) / 255.0,  
-        'robot0_eef_pos': robot0_eef_pos.astype(np.float32), 
+        'robot0_eye_in_hand_image': np.transpose(rgb_dict[inhand_cam], (2, 0, 1)) / 255.0,
+        'robot0_eef_pos': robot0_eef_pos.astype(np.float32),
         'robot0_eef_quat': robot0_eef_quat.astype(np.float32),
         'robot0_gripper_qpos': robot0_gripper_qpos.astype(np.float32),
     }
 
     return obs
 
-# !! Not sure how necessary this is 
+# !! Not sure how necessary this is
 def warm_up_policy(obs, policy, cfg):
     with torch.no_grad():
         policy.reset()
         device = torch.device('cuda')
         obs_dict_np = get_real_obs_dict(
             env_obs=obs, shape_meta=cfg.task.shape_meta)
-        obs_dict = dict_apply(obs_dict_np, 
+        obs_dict = dict_apply(obs_dict_np,
             lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
         result = policy.predict_action(obs_dict)
         action = result['action'][0].detach().to('cpu').numpy()
@@ -308,6 +310,101 @@ def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat):
     # print(f"Converted action: {action_converted}")
     return action_converted
 
+
+class PolicyInferenceThread:
+    """Thread-safe policy inference worker."""
+
+    def __init__(self, policy, cfg):
+        self.policy = policy
+        self.cfg = cfg
+        self.device = torch.device('cuda')
+
+        # Queues for communication
+        self.obs_queue = queue.Queue(maxsize=1)  # Only keep latest observation
+        self.action_queue = queue.Queue(maxsize=1)  # Only keep latest action
+
+        # Control flags
+        self.running = False
+        self.thread = None
+
+    def start(self):
+        """Start the inference thread."""
+        self.running = True
+        self.thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self.thread.start()
+        print("Policy inference thread started")
+
+    def stop(self):
+        """Stop the inference thread."""
+        self.running = False
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+        print("Policy inference thread stopped")
+
+    def _inference_loop(self):
+        """Main loop running in the inference thread."""
+        while self.running:
+            try:
+                # Get observation from queue (non-blocking with timeout)
+                obs_dict = self.obs_queue.get(timeout=0.1)
+
+                # Run inference
+                t0 = time.time()
+                with torch.no_grad():
+                    # Time tensor conversion and GPU transfer
+                    t_start = time.time()
+                    obs_dict_gpu = dict_apply(obs_dict,
+                        lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(self.device))
+                    torch.cuda.synchronize()
+                    t_to_gpu = time.time() - t_start
+
+                    # Time policy inference
+                    t_start = time.time()
+                    result = self.policy.predict_action(obs_dict_gpu)
+                    torch.cuda.synchronize()
+                    t_predict = time.time() - t_start
+
+                    # Time result transfer back to CPU
+                    t_start = time.time()
+                    action = result['action'][0].detach().to('cpu').numpy()
+                    t_to_cpu = time.time() - t_start
+
+                t_total = time.time() - t0
+
+                # Put action in queue (replace old one if full)
+                try:
+                    self.action_queue.get_nowait()  # Remove old action
+                except queue.Empty:
+                    pass
+                self.action_queue.put((action, {
+                    'to_gpu': t_to_gpu,
+                    'predict': t_predict,
+                    'to_cpu': t_to_cpu,
+                    'total': t_total
+                }))
+
+            except queue.Empty:
+                # No observation available, continue waiting
+                continue
+            except Exception as e:
+                print(f"Error in inference thread: {e}")
+                import traceback
+                traceback.print_exc()
+
+    def submit_observation(self, obs_dict):
+        """Submit observation for inference (non-blocking)."""
+        # Remove old observation if queue is full
+        try:
+            self.obs_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self.obs_queue.put(obs_dict)
+
+    def get_action(self, timeout=None):
+        """Get the latest action (blocking until available)."""
+        return self.action_queue.get(timeout=timeout)
+
+
 # %%
 def main():
 
@@ -334,12 +431,16 @@ def main():
     device = torch.device('cuda')
     policy.eval()
     policy.to(device)
-    policy.num_inference_steps = 20 
+    policy.num_inference_steps = 20
     n_action_steps = 8
     policy.n_action_steps = n_action_steps
     policy.reset()
     rotation_transformer = RotationTransformer(
             from_rep='rotation_6d', to_rep='matrix')
+
+    # Initialize policy inference thread
+    policy_thread = PolicyInferenceThread(policy, cfg)
+    policy_thread.start()
 
     ### ---- Robot Setup ----- ###
     """Test the PointCloudManager."""
@@ -357,7 +458,7 @@ def main():
     robot.cartesian_controller_parameters_client.load_param_config(
         file_path="config/control/default_cartesian_impedance.yaml"
     )
-    
+
     print("Going to start position...")
     robot.move_to(position=home_position, speed=0.15)
 
@@ -404,77 +505,87 @@ def main():
     prev_grasp_value = 0.0 # Initialize previous grasp value !! Check value
 
     print("Starting inference loop...\n====================\n====================")
-    while True:
-        iter_start = time.time()
+    try:
+        while True:
+            iter_start = time.time()
 
-        if n_steps_done >= n_steps_todo:
-            break
+            if n_steps_done >= n_steps_todo:
+                break
 
-        # Prepare robot obs - get joint state from ROS2 subscriber
-        joint_state = joint_state_subscriber.joint_values
-        gripper_val = gripper.value
-        # print(f"gripper_val: {gripper_val}")
-        joint_state = np.concatenate([joint_state, [gripper_norm_const * gripper_val]])
-        gripper_state = not gripper.is_open()
+            # Prepare robot obs - get joint state from ROS2 subscriber
+            joint_state = joint_state_subscriber.joint_values
+            gripper_val = gripper.value
+            # print(f"gripper_val: {gripper_val}")
+            joint_state = np.concatenate([joint_state, [gripper_norm_const * gripper_val]])
+            gripper_state = not gripper.is_open()
 
-        # Prepare robot obs
-        time.sleep(0.05) # wait till robot is stable (TODO: better way to do this)
+            # Prepare robot obs
+            time.sleep(0.05) # wait till robot is stable (TODO: better way to do this)
 
-        eef_pose = get_pose_from_robot(robot.end_effector_pose)
+            eef_pose = get_pose_from_robot(robot.end_effector_pose)
 
-        t0 = time.time()
-        obs_dict = franka_obs_to_diff_obs(manager, eef_pose, gripper_state, pcd_processor, joint_state)
-        # robot_pcd = visualize_robot_pcd(pcd, pcd_processor.robot_filter, joint_state)
-        t_pointcloud = time.time() - t0
+            t0 = time.time()
+            obs_dict = franka_obs_to_diff_obs(manager, eef_pose, gripper_state, pcd_processor, joint_state)
+            # robot_pcd = visualize_robot_pcd(pcd, pcd_processor.robot_filter, joint_state)
+            t_pointcloud = time.time() - t0
 
-        if n_steps_done == -1: # Warm up policy
-            # !! Update the obs input to the policy
-            warm_up_policy(obs=obs_dict, policy=policy, cfg=cfg)  # Replace None with actual observation if available
+            # Submit observation to policy thread
+            t0 = time.time()
+            policy_thread.submit_observation(obs_dict)
+            t_submit = time.time() - t0
+
+            # Get action from policy thread (blocking)
+            t0 = time.time()
+            actions, timing_info = policy_thread.get_action(timeout=7.0)
+            t_get_action = time.time() - t0
+
+            print(f"  [Policy thread timing]")
+            print(f"    to GPU:          {timing_info['to_gpu']*1000:6.1f} ms")
+            print(f"    predict_action:  {timing_info['predict']*1000:6.1f} ms")
+            print(f"    to CPU:          {timing_info['to_cpu']*1000:6.1f} ms")
+            print(f"    total inference: {timing_info['total']*1000:6.1f} ms")
+
+            # print(f"Policy inference: {actions}")
+            # visualize_pcd_and_actions(pcd=obs_dict['pcd'], actions=actions)
+
+            t0 = time.time()
+            for action in actions:
+                action = convert_action_from_fingertip_to_gripper(action, rotation_transformer)
+
+                target_pose.position = action[:3]
+                target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
+
+                # robot.move_to(position=np.array([x, y, z]), speed=0.15)
+                robot.set_target(pose=target_pose)
+                arm_rate.sleep()
+
+                grasp_value = np.round(np.clip(action[-1], 0, 1))
+                if grasp_value != prev_grasp_value:
+                    gripper.set_target(1-grasp_value)
+                    gripper_rate.sleep()
+                    time.sleep(1.0)  # wait for gripper to move (due to franka driver limitation)
+                prev_grasp_value = grasp_value
+            t_execution = time.time() - t0
+
+            iter_total = time.time() - iter_start
+            print(f"\n=== TIMING [step {n_steps_done}] ===")
+            print(f"  Point cloud :    {t_pointcloud*1000:6.1f} ms")
+            print(f"  Submit obs:      {t_submit*1000:6.1f} ms")
+            print(f"  Get action:      {t_get_action*1000:6.1f} ms")
+            print(f"  Action exec:     {t_execution*1000:6.1f} ms ({len(actions)} actions)")
+            print(f"  TOTAL:           {iter_total*1000:6.1f} ms")
+            print("=" * 30 + "\n")
+
             n_steps_done += 1
-            continue
 
-        # Get action from policy
-        t0 = time.time()
-        actions = get_action(obs=obs_dict, policy=policy, cfg=cfg)
-        t_inference = time.time() - t0
-
-        # print(f"Policy inference: {actions}")
-        # visualize_pcd_and_actions(pcd=obs_dict['pcd'], actions=actions)
-
-        t0 = time.time()
-        for action in actions:
-            action = convert_action_from_fingertip_to_gripper(action, rotation_transformer)
-
-            target_pose.position = action[:3]
-            target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
-
-            # robot.move_to(position=np.array([x, y, z]), speed=0.15)
-            robot.set_target(pose=target_pose)
-            arm_rate.sleep()
-
-            grasp_value = np.round(np.clip(action[-1], 0, 1))
-            if grasp_value != prev_grasp_value:
-                gripper.set_target(1-grasp_value)
-                gripper_rate.sleep()
-                time.sleep(1.0)  # wait for gripper to move (due to franka driver limitation)
-            prev_grasp_value = grasp_value
-        t_execution = time.time() - t0
-
-        iter_total = time.time() - iter_start
-        print(f"\n=== TIMING [step {n_steps_done}] ===")
-        print(f"  Point cloud :    {t_pointcloud*1000:6.1f} ms")
-        print(f"  Policy infer:    {t_inference*1000:6.1f} ms")
-        print(f"  Action exec:     {t_execution*1000:6.1f} ms ({len(actions)} actions)")
-        print(f"  TOTAL:           {iter_total*1000:6.1f} ms")
-        print("=" * 30 + "\n")
-
-        n_steps_done += 1
-
-    # Cleanup
-    robot.home()
-    robot.shutdown()
-    manager.destroy_node()
-    rclpy.shutdown()
+    finally:
+        # Cleanup
+        print("Shutting down...")
+        policy_thread.stop()
+        robot.home()
+        robot.shutdown()
+        manager.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

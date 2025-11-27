@@ -103,7 +103,7 @@ def main():
             # Get action from sapcemouse
             spacemouse_eef_action = sm.get_motion_state_transformed()
             spacemouse_gripper_action = sm.is_button_pressed(0) # is pressed -> 1
-            print(f"{spacemouse_eef_action}, {spacemouse_gripper_action}")
+            # print(f"{spacemouse_eef_action}, {spacemouse_gripper_action}")
             dx, dy, dz, droll, dpitch, dyaw = spacemouse_eef_action * action_scale
             # print(f"Spacemouse action: dx={dx:.4f}, dy={dy:.4f}, dz={dz:.4f}, droll={droll:.4f}, dpitch={dpitch:.4f}, dyaw={dyaw:.4f}, gripper_action={spacemouse_gripper_action}")
 
@@ -115,8 +115,9 @@ def main():
             roll, pitch, yaw = curr_roll + droll, curr_pitch + dpitch, curr_yaw - dyaw*2
             target_xyz = x, y, z
             target_orientation = np.array([roll, pitch, yaw])
+            print(f"x={x:.4f}\ty={y:.4f}\tz={z:.4f}\troll={roll:.4f}\tpitch={pitch:.4f}\tyaw={yaw:.4f}")
             # print(f"Moving to position: x={x:.4f}, y={y:.4f}, z={z:.4f}")
-            z = np.clip(z-0.02, 0.06, 0.6)
+            # z = np.clip(z-0.02, 0.06, 0.6)
             target_pose.position = np.array([x, y, z])
             target_pose.orientation = R.from_euler('XYZ', target_orientation)
             robot.set_target(pose=target_pose)        

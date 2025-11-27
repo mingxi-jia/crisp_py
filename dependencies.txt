@@ -1,0 +1,39 @@
+pip install hydra-core==1.3.2
+pip install omegaconf
+pip install dill==0.3.8
+pip install einops==0.8.1
+pip install transformers
+pip install opencv-python
+pip install rich
+pip install matplotlib
+pip install tqdm
+pip install numcodecs==0.12.1
+pip install zarr==2.16.1
+pip install wandb==0.19.6
+pip install diffusers==0.32.2
+
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip install torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+pip install torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip install open3d==0.19.0
+pip install wandb==0.19.6
+pip install pygame
+pip install imagecodecs==2024.9.22
+pip install mujoco==3.2.7
+pip install pynput
+pip install huggingface-hub==0.29.1
+pip install egl_probe
+pip install tensorboard==2.19.0
+pip install pymunk==6.11.1
+pip install psutil==6.1.1
+pip install dill==0.3.8
+pip install boto3==1.36.24
+pip install opencv-python==4.11.0.86
+pip install ema_pytorch
+pip install pyOpenGL-accelerate
+pip install pynvml
+pip install einops_exts
+pip install transformers
+pip install dill
+pip install pybullet-svl>=3.1.6.4
+pip install pytorch_fid
