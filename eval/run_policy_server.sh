@@ -19,4 +19,4 @@ echo "Checkpoint: $CKPT_PATH"
 echo "Port: $PORT"
 echo ""
 
-python examples/server_diff_policy.py --ckpt_path "$CKPT_PATH" --port "$PORT"
+python eval/server_diff_policy.py --ckpt_path "$CKPT_PATH" --port "$PORT"

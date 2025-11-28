@@ -9,4 +9,4 @@ echo "Starting PCD processing server..."
 echo "Port: $PORT"
 echo ""
 
-python examples/server_pcd_processing.py --port "$PORT"
+python eval/server_pcd_processing.py --port "$PORT"
