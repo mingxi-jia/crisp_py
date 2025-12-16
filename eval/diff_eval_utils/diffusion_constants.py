@@ -43,7 +43,7 @@ class DPEvalConfig:
     # Chunking parameters (used when mode != 'simple')
     policy_delay: int = 4
     horizon: int = 16
-    action_exec_size: int = 8
+    action_exec_size: int = 10
 
     # Blending parameters (only when mode == 'blending')
     merge_range: int = 4
@@ -51,6 +51,7 @@ class DPEvalConfig:
     # Debug options
     debug_plotting: bool = False
     debug_output_dir: Path = field(default_factory=lambda: Path("debug_plots"))
+    visualize: bool = False
 
     # External paths
     toolbox_path: str = '/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox'
@@ -84,4 +85,5 @@ class DPEvalConfig:
             debug_plotting=args.debug_plotting,
             policy_server_port=args.policy_port,
             pcd_server_port=args.pcd_port,
+            visualize=args.visualize,
         )

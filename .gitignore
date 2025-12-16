@@ -18,3 +18,6 @@ crisp_py/sensors/__pycache__
 crisp_py/utils/__pycache__
 tests/__pycache__
 tests/unit/__pycache__
+
+*.pkl
+*.pyc

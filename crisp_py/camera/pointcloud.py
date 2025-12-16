@@ -154,6 +154,8 @@ class PointCloudManager(Node):
         all_colors = []
 
         for i, (rgb, depth) in enumerate(zip(self.rgb_images, self.depth_images), 1):
+            # if i != 3:
+            #     continue
             cam_name = f"cam{i}"
             cam_params = self.cam_params[cam_name]
             R, t = self.transforms[cam_name]

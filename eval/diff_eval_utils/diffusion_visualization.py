@@ -3,7 +3,7 @@
 import numpy as np
 import open3d as o3d
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-
+from robot_filter.arm_segmentor import RobotArmSegmentation
 
 def visualize_pcd(pcd: np.ndarray, robot_pcd=None):
     """Visualize point cloud using Open3D.
@@ -34,6 +34,7 @@ def visualize_robot_pcd(raw_pcd, robot_seg, joint_state):
     Returns:
         Open3D point cloud geometry of robot
     """
+    robot_seg = RobotArmSegmentation()
     joint_names = sorted([j.name for j in robot_seg.robot_urdf.actuated_joints])
     joint_angles = dict(zip(joint_names, joint_state))
 
@@ -86,3 +87,11 @@ def visualize_pcd_and_actions(pcd, actions, robot_pcd=None):
         o3d.visualization.draw_geometries([pcd_o3d, robot_pcd] + action_frames)
     else:
         o3d.visualization.draw_geometries([pcd_o3d] + action_frames)
+
+def np2o3d(pcd):
+    # pcd: (n, 3)
+    # color: (n, 3)
+    pcd_o3d = o3d.geometry.PointCloud()
+    pcd_o3d.points = o3d.utility.Vector3dVector(pcd[:, :3])
+    pcd_o3d.colors = o3d.utility.Vector3dVector(pcd[:, 3:])
+    return pcd_o3d

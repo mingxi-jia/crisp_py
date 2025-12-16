@@ -1,40 +1,45 @@
 from crisp_py.spacemouse import Spacemouse
 import time
-
-
-from crisp_py.robot import Robot
-from crisp_py.gripper.gripper import Gripper, GripperConfig
-
 import sys
+import threading
+
+import rclpy
+from std_msgs.msg import Int32MultiArray
+
+from crisp_py.robot import Robot, Pose
+from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 from scipy.spatial.transform import Rotation as R
 
 import numpy as np
-import copy
 
 from pynput import keyboard
 
 def main():
-    ctrl_freq = 10.0 # Hz
-    action_scale = 0.02  # 1 cm per action unit
+    ctrl_freq = 10.0  # Hz
+    action_scale = 0.01  # 1 cm per action unit
 
     # Shared state for keyboard reset trigger
     reset_requested = {'flag': False}
+    gripper_closed = {'value': False}
+    lock = threading.Lock()
 
     def on_press(key):
-        try:
-            if key.char == 'x':
-                reset_requested['flag'] = True
-                print("\n[RESET] 'x' key pressed - resetting to start position...")
-        except AttributeError:
-            pass
+        with lock:
+            try:
+                if key.char == 'r':
+                    reset_requested['flag'] = True
+            except AttributeError:
+                pass
+
+    def on_release(key):
+        pass
 
     # Start keyboard listener
-    listener = keyboard.Listener(on_press=on_press)
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
 
     ### ---- Robot Setup ----- ###
-    # Initialize robot
     robot = Robot(namespace="")
     robot.wait_until_ready()
     print(f"Robot ready. Current joint values: {robot.joint_values}")
@@ -42,17 +47,16 @@ def main():
     print(robot.joint_values)
     print("Going to home position...")
     robot.home()
-    homing_pose = robot.end_effector_pose.copy()
 
     robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
     robot.cartesian_controller_parameters_client.load_param_config(
         file_path="config/control/spacemouse_cartesian_impedance.yaml"
     )
     time.sleep(2.0)
-    
 
     print("Going to start position...")
-    robot.move_to(position=np.array([0.5, 0., 0.3]), speed=0.15)
+    home_pose = Pose(position=np.array([0.6, 0., 0.35]), orientation=R.from_euler('XYZ', [np.pi, 0, 0]))
+    robot.move_to(pose=home_pose, speed=0.15)
 
     # Initialize gripper
     gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
@@ -66,87 +70,112 @@ def main():
     target_orientation = np.array(target_pose.orientation.as_euler('XYZ'))
 
     # Save initial start position and orientation for reset
-    start_position = np.array([0.5, 0., 0.3])
     start_orientation = target_orientation.copy()
     arm_rate = robot.node.create_rate(ctrl_freq)
     gripper_rate = gripper.node.create_rate(ctrl_freq)
-    prev_grasp_value = 0
-    
-    print("Starting Spacemouse control loop...\n====================\n====================")
-    print("Press 'r' to reset gripper and move to start position [0.5, 0., 0.3]")
-    with Spacemouse(deadzone=0.3) as sm:
+    prev_button_pressed = False
+
+    # Create spacemouse signal publisher
+    # Format: [dx, dy, dz, droll, dpitch, dyaw, gripper_toggle, reset]
+    spacemouse_pub = robot.node.create_publisher(Int32MultiArray, '/teleop/signals', 30)
+
+    print("\n" + "=" * 50)
+    print("Spacemouse Control Active")
+    print("=" * 50)
+    print("\nControls:")
+    print("  Spacemouse - 6DOF control (position + rotation)")
+    print("  Button 0 - Toggle gripper open/close")
+    print("  R - Reset to start position")
+    print("  Ctrl+C - Exit")
+    print("=" * 50 + "\n")
+    with Spacemouse(deadzone=0.1) as sm:
         while True:
+            with lock:
+                # Check for reset request
+                if reset_requested['flag']:
+                    print("\n[RESET] Resetting to start position...")
+                    reset_requested['flag'] = False
+                    gripper.set_target(1.0)
+                    gripper_closed['value'] = False
+                    time.sleep(1.0)
 
-            # Check for reset request
-            if reset_requested['flag']:
-                print("Resetting gripper to open...")
-                gripper.set_target(1.0)
-                time.sleep(1.0)
+                    robot.move_to(pose=home_pose, speed=0.15)
 
-                print("Moving to start position and orientation...")
-                robot.move_to(position=start_position, speed=0.15)
+                    target_pose = robot.end_effector_pose
+                    target_xyz = np.array(target_pose.position)
+                    target_orientation = start_orientation.copy()
+                    print("Reset complete!\n")
+                    continue
 
-                # Update target pose and orientation
-                target_pose = robot.end_effector_pose
-                target_xyz = np.array(target_pose.position)
-                target_orientation = start_orientation.copy()
-
-                print("Reset complete!\n")
-                reset_requested['flag'] = False
-                prev_grasp_value = 0
-
+            # Check for large deviation
             if np.linalg.norm(target_pose.position - robot.end_effector_pose.position) > 0.02:
-                # print("Warning: Large deviation from target pose. Stopping control.")
+                arm_rate.sleep()
                 continue
 
-
-            # Get action from sapcemouse
+            # Get action from spacemouse
             spacemouse_eef_action = sm.get_motion_state_transformed()
-            spacemouse_gripper_action = sm.is_button_pressed(0) # is pressed -> 1
-            # print(f"{spacemouse_eef_action}, {spacemouse_gripper_action}")
+            button_pressed = sm.is_button_pressed(0)  # is pressed -> True
             dx, dy, dz, droll, dpitch, dyaw = spacemouse_eef_action * action_scale
-            # print(f"Spacemouse action: dx={dx:.4f}, dy={dy:.4f}, dz={dz:.4f}, droll={droll:.4f}, dpitch={dpitch:.4f}, dyaw={dyaw:.4f}, gripper_action={spacemouse_gripper_action}")
 
+            # Publish spacemouse signals
+            # Format: [dx, dy, dz, droll, dpitch, dyaw, gripper_toggle, reset]
+            spacemouse_msg = Int32MultiArray()
+            gripper_toggle = 1 if (button_pressed and not prev_button_pressed) else 0
+            # Convert float deltas to int (scaled by 100 to preserve precision)
+            dx_int = (1 if dx > 0 else -1 if dx < 0 else 0)
+            dy_int = (1 if dy > 0 else -1 if dy < 0 else 0)
+            dz_int = (1 if dz > 0 else -1 if dz < 0 else 0)
+            droll_int = (1 if droll > 0 else -1 if droll < 0 else 0)
+            dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
+            dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
+            spacemouse_msg.data = [dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, gripper_toggle, 0]
+            spacemouse_pub.publish(spacemouse_msg)
+
+            if np.linalg.norm(target_pose.position - robot.end_effector_pose.position) > 0.05:
+                arm_rate.sleep()
+                continue
+            
+
+            # Apply position and rotation deltas
             curr_x, curr_y, curr_z = target_xyz
             curr_roll, curr_pitch, curr_yaw = target_orientation
-            # print(f"Moving to position: x={curr_x:.4f}, y={curr_y:.4f}, z={curr_z:.4f}")
-            # if (daction==0).all():
-            x, y, z = curr_x + dx, curr_y + dy, curr_z + dz
-            roll, pitch, yaw = curr_roll + droll, curr_pitch + dpitch, curr_yaw - dyaw*2
-            target_xyz = x, y, z
+
+            x = curr_x + dx
+            y = curr_y + dy
+            z = curr_z + dz
+            roll = curr_roll + droll
+            pitch = curr_pitch + dpitch
+            yaw = curr_yaw - dyaw * 2
+
+            # clip z to be above table height
+            z = max(z, 0.02)
+
+            target_xyz = np.array([x, y, z])
             target_orientation = np.array([roll, pitch, yaw])
-            print(f"x={x:.4f}\ty={y:.4f}\tz={z:.4f}\troll={roll:.4f}\tpitch={pitch:.4f}\tyaw={yaw:.4f}")
-            # print(f"Moving to position: x={x:.4f}, y={y:.4f}, z={z:.4f}")
-            # z = np.clip(z-0.02, 0.06, 0.6)
-            target_pose.position = np.array([x, y, z])
+
+            # Only print if there's movement
+            if dx != 0 or dy != 0 or dz != 0 or droll != 0 or dpitch != 0 or dyaw != 0:
+                print(f"x={x:.4f}\ty={y:.4f}\tz={z:.4f}\troll={roll:.4f}\tpitch={pitch:.4f}\tyaw={yaw:.4f}")
+
+            target_pose.position = target_xyz
             target_pose.orientation = R.from_euler('XYZ', target_orientation)
-            robot.set_target(pose=target_pose)        
+            robot.set_target(pose=target_pose)
             arm_rate.sleep()
 
-            grasp_value = np.clip(spacemouse_gripper_action, 0, 1)
-            if grasp_value != prev_grasp_value:
-                print(f"Setting gripper to {grasp_value}")
-                gripper.set_target(1-grasp_value)
+            # Handle gripper toggle
+            if button_pressed and not prev_button_pressed:
+                gripper_closed['value'] = not gripper_closed['value']
+                gripper_target = 0.0 if gripper_closed['value'] else 1.0
+                print(f"Gripper {'closing' if gripper_closed['value'] else 'opening'}...")
+                gripper.set_target(gripper_target)
                 gripper_rate.sleep()
-                time.sleep(1.0)  # wait for gripper to move
-            prev_grasp_value = grasp_value
+                time.sleep(0.5)
+            prev_button_pressed = button_pressed
 
-
-            # # Get current state
-
-            # if (action!=0).any():
-            #     target_xyz = np.array(target_pose.position)
-                # target_orientation = np.array(target_pose.orientation.as_euler('XYZ'))
-            # gripper_val = gripper.value
-            # target_pose = robot.end_effector_pose
-            # gripper_state = not gripper.is_open()
-            # curr_xyz = target_pose.position 
-            # curr_orientation = target_pose.orientation.as_euler('XYZ')
-
-        # Cleanup
-        listener.stop()
-        robot.home()
-        robot.shutdown()
+    # Cleanup
+    listener.stop()
+    robot.home()
+    robot.shutdown()
 
 if __name__ == "__main__":
     try:
@@ -154,10 +183,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received, shutting down...")
         try:
+            import rclpy
             rclpy.shutdown()
         except Exception:
             pass
-        try:
-            sys.exit(0)
-        except SystemExit:
-            pass
+        sys.exit(0)

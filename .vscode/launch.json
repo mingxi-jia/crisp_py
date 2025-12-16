@@ -27,10 +27,16 @@
             "name": "Python Debugger: pcd diffusion policy eval",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/examples/pcd_diff_eval.py",
+            "program": "${workspaceFolder}/eval/pcd_diff_eval.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "justMyCode": false
+            "justMyCode": false,
+            "args": [
+            "--mode", "simple",
+            "--n-steps", "60",
+            "--direct-policy",
+            "--ckpt-path", "/home/mingxi/Downloads/epoch=0060-val_loss=0.021 (1).ckpt"
+            ]
         }
     ]
 }

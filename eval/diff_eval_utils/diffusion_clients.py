@@ -3,6 +3,16 @@
 import base64
 import numpy as np
 import requests
+import sys
+import time
+import torch
+import dill
+import hydra
+
+sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
+from diffusion_policy.workspace.base_workspace import BaseWorkspace
+from diffusion_policy.policy.base_image_policy import BaseImagePolicy
+from diffusion_policy.common.pytorch_util import dict_apply
 
 
 class PolicyClient:
@@ -153,7 +163,8 @@ class PcdProcessingClient:
         # Encode inputs as base64
         data = {
             'rgb_dict': {},
-            'depth_dict': {}
+            'depth_dict': {},
+            'is_contact': None
         }
 
         for cam_name, img in rgb_dict.items():
@@ -194,4 +205,73 @@ class PcdProcessingClient:
             img_bytes = base64.b64decode(img_data['data'])
             processed_depth[cam_name] = np.frombuffer(img_bytes, dtype=img_data['dtype']).reshape(img_data['shape'])
 
-        return processed_rgb, processed_depth
+        is_contact = result['is_contact']
+
+        return processed_rgb, processed_depth, is_contact
+
+
+class DirectPolicyWrapper:
+    """Direct policy wrapper that mimics PolicyClient interface but runs policy locally.
+
+    This is useful for debugging to bypass server communication overhead.
+    """
+
+    def __init__(self, ckpt_path: str):
+        """Initialize policy directly from checkpoint.
+
+        Args:
+            ckpt_path: Path to policy checkpoint file
+        """
+        self.ckpt_path = ckpt_path
+        self.policy = None
+        self.device = None
+        self._initialize_policy()
+
+    def _initialize_policy(self):
+        """Initialize the diffusion policy model."""
+        print(f"Loading policy directly from {self.ckpt_path}")
+        payload = torch.load(open(self.ckpt_path, 'rb'), pickle_module=dill)
+        cfg = payload['cfg']
+        cfg.logging.resume = False
+        cfg.logging.mode = 'offline'
+        cfg.real_robot_eval = True
+
+        cls = hydra.utils.get_class(cfg._target_)
+        workspace = cls(cfg)
+        workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+
+        self.policy = workspace.model
+        self.device = torch.device('cuda')
+        self.policy.eval()
+        self.policy.to(self.device)
+        self.policy.num_inference_steps = 20
+        self.policy.n_action_steps = 16
+        self.policy.reset()
+
+        print("Policy initialized successfully (direct mode)")
+
+    def predict_action(self, obs_dict: dict) -> np.ndarray:
+        """Get action prediction directly from policy.
+
+        Args:
+            obs_dict: Dictionary of numpy array observations
+
+        Returns:
+            Action array
+        """
+        with torch.no_grad():
+            # Convert numpy observations to torch tensors
+            obs_dict_torch = dict_apply(obs_dict,
+                lambda x: torch.from_numpy(x.copy()).unsqueeze(0).unsqueeze(1).to(self.device))
+
+            # Run inference
+            result = self.policy.predict_action(obs_dict_torch)
+
+            # Convert back to numpy
+            action = result['action'][0].detach().to('cpu').numpy()
+
+        return action
+
+    def reset(self):
+        """Reset the policy."""
+        self.policy.reset()

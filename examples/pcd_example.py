@@ -44,8 +44,8 @@ def main():
 
     # Spin in background thread to receive messages
     import threading
-    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
-    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
+    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
+    # spin_thread = threading.Thread(target=rclpy.spin, args=(manager,))
     spin_thread.start()
 
     # Wait and visualize
@@ -58,23 +58,24 @@ def main():
         # Visualize filtered point cloud
         if pcd is not None:
 
+            o3d.visualization.draw_geometries([pcd])
             # crop pcd using workspace
             
 
             # Get current joint state from robot
-            joint_state = robot.joint_values
-            filtered_pcd = robot_seg.segment(pcd, joint_state)
+            # joint_state = robot.joint_values
+            # filtered_pcd = robot_seg.segment(pcd, joint_state)
 
-            print(f"Iteration {i+1}: Filtered PCD has {len(filtered_pcd)} points")
-            filtered_pcd_o3d = o3d.geometry.PointCloud()
-            filtered_pcd_o3d.points = o3d.utility.Vector3dVector(filtered_pcd[:, :3])
-            filtered_pcd_o3d.colors = o3d.utility.Vector3dVector(filtered_pcd[:, 3:])
-            o3d.visualization.draw_geometries(
-                [filtered_pcd_o3d],
-                window_name="Filtered Point Cloud",
-                width=800,
-                height=600
-            )
+            # print(f"Iteration {i+1}: Filtered PCD has {len(filtered_pcd)} points")
+            # filtered_pcd_o3d = o3d.geometry.PointCloud()
+            # filtered_pcd_o3d.points = o3d.utility.Vector3dVector(filtered_pcd[:, :3])
+            # filtered_pcd_o3d.colors = o3d.utility.Vector3dVector(filtered_pcd[:, 3:])
+            # o3d.visualization.draw_geometries(
+            #     [filtered_pcd_o3d],
+            #     window_name="Filtered Point Cloud",
+            #     width=800,
+            #     height=600
+            # )
         elif pcd is not None:
             print(f"Iteration {i+1}: No filtering applied, showing original PCD")
 

@@ -156,7 +156,7 @@ def main():
             # Calculate position delta from WASD + Arrow keys
             dx = (1 if key_state['s'] else 0) - (1 if key_state['w'] else 0)
             dy = (1 if key_state['d'] else 0) - (1 if key_state['a'] else 0)
-            dz = (1 if key_state['up'] else 0) - (1 if key_state['down'] else 0)
+            dz = (1 if key_state['q'] else 0) - (1 if key_state['e'] else 0)
 
             # Calculate rotation delta from IJKL + UO
             droll = (1 if key_state['i'] else 0) - (1 if key_state['k'] else 0)
@@ -172,10 +172,11 @@ def main():
         keyboard_msg = Int32MultiArray()
         gripper_toggle = 1 if (space_pressed and not prev_space_pressed) else 0
         keyboard_msg.data = [dx, dy, dz, droll, dpitch, dyaw, gripper_toggle, int(reset_pressed)]
+        print([dx, dy, dz, droll, dpitch, dyaw, gripper_toggle, int(reset_pressed)])
         keyboard_pub.publish(keyboard_msg)
 
         # Check for large deviation
-        if np.linalg.norm(target_pose.position - robot.end_effector_pose.position) > 0.02:
+        if np.linalg.norm(target_pose.position - robot.end_effector_pose.position) > 0.05:
             arm_rate.sleep()
             continue
 

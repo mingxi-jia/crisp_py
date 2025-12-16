@@ -7,7 +7,7 @@ import base64
 from flask import Flask, request, jsonify
 
 sys.path.append('/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox')
-from hand.trajectory_loader import ObservationProcessor
+from hand_tool.trajectory_loader import ObservationProcessor
 
 app = Flask(__name__)
 
@@ -46,7 +46,7 @@ def process_pcd():
 
         # Process point cloud
         t0 = time.time()
-        processed_pcd, render_pcd = pcd_processor.get_policy_obs(pcd, eef_pose, joint_state)
+        processed_pcd, render_pcd = pcd_processor.get_policy_obs(pcd, eef_pose, joint_state, True)
         t_process = time.time() - t0
 
         # Encode results as base64
@@ -133,6 +133,7 @@ def process_images():
         response = {
             'rgb_dict': result_rgb,
             'depth_dict': result_depth,
+            'is_contact': bool(is_contact),
             'timing': {
                 'process': t_process * 1000
             }
