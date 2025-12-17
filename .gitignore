@@ -21,3 +21,5 @@ tests/unit/__pycache__
 
 *.pkl
 *.pyc
+
+raw_datasets

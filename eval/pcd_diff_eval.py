@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Unified ROS2 diffusion policy evaluation script.
 
-Supports three control modes:
+Supports four control modes:
 - simple: Sequential action execution without buffering
 - chunking: Action buffering with policy_delay offset
 - blending: Action blending in overlap regions
+- intv: Recording control with keyboard ('x' to reset, 'r' to toggle recording)
 
 Also supports inspection mode:
 - --vis-pcd: Visualize observations without running policy or actions
@@ -15,6 +16,7 @@ Debug mode:
 Examples:
 python eval/pcd_diff_eval.py --mode simple --n-steps 9999
 python eval/pcd_diff_eval.py --mode simple --n-steps 60 --debug-plotting
+python eval/pcd_diff_eval.py --mode intv  # Recording mode (no n-steps needed)
 python eval/pcd_diff_eval.py --vis-pcd  # Inspection mode
 python eval/pcd_diff_eval.py --mode simple --n-steps 60 --direct-policy --ckpt-path /path/to/checkpoint.ckpt  # Debug mode
 """
@@ -30,6 +32,7 @@ import numpy as np
 
 from crisp_py.camera.pointcloud import PointCloudManager
 from crisp_py.robot import Robot
+from crisp_py.robot_config import FrankaConfig
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 # Add external dependencies
@@ -57,9 +60,9 @@ def parse_args():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['simple', 'chunking', 'blending'],
+        choices=['simple', 'chunking', 'blending', 'intv'],
         default='simple',
-        help='Control mode: simple (sequential), chunking (buffered), or blending (merged)'
+        help='Control mode: simple (sequential), chunking (buffered), blending (merged), or intv (recording control)'
     )
 
     parser.add_argument(
@@ -133,7 +136,9 @@ def setup_robot(config: DPEvalConfig):
     Returns:
         Initialized Robot instance
     """
-    robot = Robot(namespace="")
+    config_franka = FrankaConfig()
+    config_franka.home_config = config.home_joint_position
+    robot = Robot(namespace="", robot_config=config_franka)
     robot.wait_until_ready()
     print(f"Robot ready. Joint values: {robot.joint_values}")
     print(f"End effector pose: {robot.end_effector_pose}")
@@ -146,8 +151,8 @@ def setup_robot(config: DPEvalConfig):
         file_path="config/control/default_cartesian_impedance.yaml"
     )
 
-    print("Moving to start position...")
-    robot.move_to(position=START_POSITION, speed=0.15)
+    # print("Moving to start position...")
+    # robot.move_to(position=START_POSITION, speed=0.15)
 
     return robot
 
@@ -337,7 +342,10 @@ def main():
         print("="*60)
         print(f"Diffusion Policy Control - Mode: {config.mode.upper()}")
         print("="*60)
-        print(f"Steps: {config.n_steps}")
+        if config.mode != 'intv':
+            print(f"Steps: {config.n_steps}")
+        else:
+            print(f"Mode: Recording control (runs until Ctrl+C)")
         print(f"Control frequency: {config.ctrl_freq} Hz")
         print(f"Debug plotting: {config.debug_plotting}")
         print(f"Visualize observations: {config.visualize}")
@@ -389,7 +397,12 @@ def main():
         print("\n" + "="*60)
         print("STARTING CONTROL LOOP")
         print("="*60 + "\n")
-        controller.run(n_steps=config.n_steps)
+        if config.mode == 'intv':
+            # Recording mode - runs indefinitely until Ctrl+C
+            controller.run()
+        else:
+            # Normal modes - run for n_steps
+            controller.run(n_steps=config.n_steps)
 
         # Cleanup
         print("\n" + "="*60)

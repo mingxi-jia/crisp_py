@@ -40,6 +40,9 @@ CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0060-val_loss=0.019.ckpt}" # Screw 
 # CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0020-val_loss=0.012.ckpt}" # Screw Hand Only Interpolated 0.6
 CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0100-val_loss=0.013.ckpt}" # Screw Hand Only Interpolated 0.5
 CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0020-val_loss=0.020.ckpt}" # Screw Hand Only Fixed normalization pointnet-voxel
+CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0020-val_loss=0.020-pointnet.ckpt}" # Screw Hand Only Fixed normalization pointnet
+CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0060-val_loss=0.022.ckpt}" # Screw Hand Only Fixed normalization pointnet
+
 # CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0060-val_loss=0.021.ckpt}" # Screw Pretrain + MixTrain Interpolated 0.5
 # CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0120-val_loss=0.025.ckpt}" # Screw Pretrain + MixTrain Interpolated 0.5
 # CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0060-val_loss=0.021 (1).ckpt}" # Screw Pretrain + MixTrain Interpolated 0.5 + raw_pcd wrist gating

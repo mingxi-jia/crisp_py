@@ -33,11 +33,17 @@ class DPEvalConfig:
     policy_server_port: int = 5000
     pcd_server_port: int = 5001
 
+    home_joint_position: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [-0.0018238854882693634, 0.11935392208236248, 0.00038266319676497025, -1.8032021275778523, 0.0038454665934960987, 1.9434627378430058, 0.7968990482289469]
+        )
+    )
+
     # Control parameters
-    ctrl_freq: float = 10.0
+    ctrl_freq: float = 5.0
     n_steps: int = 40
 
-    # Controller mode: 'simple', 'chunking', 'blending'
+    # Controller mode: 'simple', 'chunking', 'blending', 'intv'
     mode: str = 'simple'
 
     # Chunking parameters (used when mode != 'simple')
@@ -59,8 +65,8 @@ class DPEvalConfig:
 
     def __post_init__(self):
         """Validate configuration."""
-        if self.mode not in ['simple', 'chunking', 'blending']:
-            raise ValueError(f"Invalid mode: {self.mode}. Must be 'simple', 'chunking', or 'blending'")
+        if self.mode not in ['simple', 'chunking', 'blending', 'intv']:
+            raise ValueError(f"Invalid mode: {self.mode}. Must be 'simple', 'chunking', 'blending', or 'intv'.")
 
         if self.mode in ['chunking', 'blending']:
             if self.action_exec_size + self.policy_delay > self.horizon:

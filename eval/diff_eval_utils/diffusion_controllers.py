@@ -155,6 +155,430 @@ class SimpleSequentialController(RobotController):
             iter_total = time.time() - iter_start
             print(f"Step {n_steps_done}: {iter_total*1000:.1f} ms")
 
+class InterventionController(SimpleSequentialController):
+    """Controller with human intervention capability via spacemouse and recording control.
+
+    Two-layer State Machine:
+
+    Recording States (outer layer):
+    - NOT_READY: Robot is not ready to record
+    - READY: Robot is at start position, ready to start
+    - RECORDING: Policy/intervention active
+
+    Policy States (inner layer, only active when RECORDING):
+    - POLICY_MODE: Execute actions from diffusion policy
+    - INTERVENTION_MODE: Follow spacemouse input (human takeover)
+
+    Key Controls:
+    - 'x': Reset to start position (NOT_READY → READY)
+    - 'r': Toggle recording (READY ↔ RECORDING)
+    - 'i': Resume policy from intervention (INTERVENTION → POLICY)
+    - Spacemouse: Automatic intervention trigger (POLICY → INTERVENTION)
+    """
+
+    # Constants
+    ACTION_SCALE = 0.01  # 1cm per spacemouse unit
+    DEADZONE = 0.1  # Spacemouse deadzone threshold
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # Recording state machine (outer layer)
+        self.NOT_READY = 'not_ready'
+        self.READY = 'ready'
+        self.RECORDING = 'recording'
+        self.recording_state = self.READY  # Start in READY mode
+
+        # Policy state machine (inner layer)
+        self.POLICY_MODE = 'policy'
+        self.INTERVENTION_MODE = 'intervention'
+        self.mode = self.POLICY_MODE
+
+        # Spacemouse (initialized in run() using context manager)
+        self.spacemouse = None
+
+        # Keyboard listener state
+        self.key_commands = {'x': False, 'r': False, 'i': False}
+        self.listener_lock = threading.Lock()
+        self.keyboard_listener = None
+
+        # ROS2 publisher for intervention signals
+        self.intervention_pub = None
+
+        # Target pose tracking for intervention mode
+        self.intervention_target_pose = None
+
+        # Gripper button state tracking
+        self.prev_button_pressed = False
+
+    def _setup_keyboard_listener(self):
+        """Initialize keyboard listener for 'x', 'r', and 'i' keys."""
+        from pynput import keyboard
+
+        def on_press(key):
+            with self.listener_lock:
+                try:
+                    if hasattr(key, 'char'):
+                        if key.char == 'x':
+                            self.key_commands['x'] = True
+                            print("\n[KEY: x] Reset to start position requested...")
+                        elif key.char == 'r':
+                            self.key_commands['r'] = True
+                            print("\n[KEY: r] Recording toggle requested...")
+                        elif key.char == 'i':
+                            self.key_commands['i'] = True
+                            print("\n[KEY: i] Resume policy requested...")
+                except AttributeError:
+                    pass
+
+        self.keyboard_listener = keyboard.Listener(on_press=on_press)
+        self.keyboard_listener.start()
+        print("Keyboard listener started:")
+        print("  'x' - Reset to start position (not_ready -> ready)")
+        print("  'r' - Toggle recording (ready <-> recording)")
+        print("  'i' - Resume policy from intervention")
+
+    def _setup_intervention_publisher(self):
+        """Create ROS2 publisher for intervention signals."""
+        from std_msgs.msg import Int32MultiArray
+
+        self.intervention_pub = self.robot.node.create_publisher(
+            Int32MultiArray,
+            '/teleop/signals',
+            30
+        )
+        print("Intervention signal publisher created on /teleop/signals")
+
+    def _publish_intervention_state(self, state: int):
+        """Publish intervention state (0=idle, 1=policy, 2=intervention).
+
+        Args:
+            state: 0 (idle), 1 (policy action), 2 (intervention action)
+        """
+        from std_msgs.msg import Int32MultiArray
+        msg = Int32MultiArray()
+        msg.data = [state, 0, 0, 0, 0, 0, 0, 0, 0]
+        print(f"[PUBLISH] Publishing intervention state: {state}")
+        self.intervention_pub.publish(msg)
+
+    def _cleanup(self):
+        """Clean up resources."""
+        if self.keyboard_listener is not None:
+            self.keyboard_listener.stop()
+            print("Keyboard listener stopped")
+
+    def _check_for_intervention_trigger(self, spacemouse_motion):
+        """Check if spacemouse motion triggers intervention.
+
+        Args:
+            spacemouse_motion: 6-element array [dx, dy, dz, droll, dpitch, dyaw]
+
+        Returns:
+            bool: True if intervention should be triggered
+        """
+        # Any non-zero motion triggers intervention
+        motion_detected = np.any(np.abs(spacemouse_motion) > 1e-6)
+        return motion_detected
+
+    def _check_key_command(self, key):
+        """Check if a key command was triggered and reset flag.
+
+        Args:
+            key: Key to check ('x', 'r', or 'i')
+
+        Returns:
+            bool: True if key was pressed
+        """
+        with self.listener_lock:
+            if self.key_commands[key]:
+                self.key_commands[key] = False
+                return True
+        return False
+
+    def _handle_reset_to_start(self):
+        """Handle 'x' key press: reset robot to start position."""
+        from .diffusion_constants import START_POSITION
+
+        print(f"\n{'='*60}")
+        print("[RESET] Moving robot to start position...")
+        print(f"{'='*60}")
+        self.robot.home()
+        self.robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+        self.robot.cartesian_controller_parameters_client.load_param_config(
+            file_path="config/control/default_cartesian_impedance.yaml"
+        )
+
+
+        # Transition to READY
+        self.recording_state = self.READY
+        print(f"[STATE] not_ready -> ready")
+        print(f"{'='*60}\n")
+
+    def _handle_recording_toggle(self):
+        """Handle 'r' key press: toggle between ready/recording states."""
+        if self.recording_state == self.READY:
+            # Start recording: READY -> RECORDING
+            print(f"\n{'='*60}")
+            print("[START RECORDING] Starting policy inference...")
+            print(f"{'='*60}")
+
+            self.recording_state = self.RECORDING
+            self.mode = self.POLICY_MODE  # Reset to policy mode
+
+            print(f"[STATE] ready -> recording (policy mode)")
+            print(f"{'='*60}\n")
+
+        elif self.recording_state == self.RECORDING:
+            # Stop recording: RECORDING -> NOT_READY
+            print(f"\n{'='*60}")
+            print("[STOP RECORDING] Stopping robot actions...")
+            print(f"{'='*60}")
+
+            self.recording_state = self.NOT_READY
+            self.mode = self.POLICY_MODE  # Reset to policy mode
+
+            print(f"[STATE] recording -> not_ready")
+            print(f"{'='*60}\n")
+
+    def _execute_intervention_step(self, spacemouse):
+        """Execute one step of spacemouse control.
+
+        Args:
+            spacemouse: Spacemouse instance
+        """
+        from std_msgs.msg import Int32MultiArray
+
+        # Get spacemouse motion and button state
+        motion = spacemouse.get_motion_state_transformed()
+        dx, dy, dz, droll, dpitch, dyaw = motion * self.ACTION_SCALE
+        button_pressed = spacemouse.is_button_pressed(0)
+
+        # Detect gripper toggle event
+        gripper_toggle = 1 if (button_pressed and not self.prev_button_pressed) else 0
+
+        # Publish intervention signals (always publish during intervention mode)
+        has_movement = (dx != 0 or dy != 0 or dz != 0 or droll != 0 or dpitch != 0 or dyaw != 0)
+
+        if has_movement or gripper_toggle:
+            # Publish intervention signals (for data collection/logging)
+            msg = Int32MultiArray()
+            # Convert to discrete signals (sign only)
+            dx_int = (1 if dx > 0 else -1 if dx < 0 else 0)
+            dy_int = (1 if dy > 0 else -1 if dy < 0 else 0)
+            dz_int = (1 if dz > 0 else -1 if dz < 0 else 0)
+            droll_int = (1 if droll > 0 else -1 if droll < 0 else 0)
+            dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
+            dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
+            # Format: [state, dx, dy, dz, droll, dpitch, dyaw, gripper, reset]
+            # state=2 means intervention action
+            msg.data = [2, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, gripper_toggle, 0]
+            self.intervention_pub.publish(msg)
+
+        # Update target pose
+        curr_pos = self.intervention_target_pose.position
+        curr_euler = self.intervention_target_pose.orientation.as_euler('XYZ')
+
+        # Apply deltas
+        new_pos = np.array([
+            curr_pos[0] + dx,
+            curr_pos[1] + dy,
+            max(curr_pos[2] + dz, 0.02)  # Safety: don't go below table
+        ])
+
+        new_euler = np.array([
+            curr_euler[0] + droll,
+            curr_euler[1] + dpitch,
+            curr_euler[2] - dyaw * 2  # Match spacemouse_example.py convention
+        ])
+
+        # Update and send to robot
+        self.intervention_target_pose.position = new_pos
+        self.intervention_target_pose.orientation = R.from_euler('XYZ', new_euler)
+        self.robot.set_target(pose=self.intervention_target_pose)
+
+        # Only print if there's movement
+        if dx != 0 or dy != 0 or dz != 0 or droll != 0 or dpitch != 0 or dyaw != 0:
+            print(f"[INTERVENTION] x={new_pos[0]:.4f} y={new_pos[1]:.4f} z={new_pos[2]:.4f} "
+                  f"roll={new_euler[0]:.4f} pitch={new_euler[1]:.4f} yaw={new_euler[2]:.4f}")
+
+        # Handle gripper button toggle (button_pressed already retrieved above)
+        if gripper_toggle:
+            # Toggle gripper state
+            new_gripper_value = 1.0 - self.prev_grasp_value
+            print(f"[GRIPPER] {'Closing' if new_gripper_value == 1.0 else 'Opening'} gripper...")
+            self.gripper.set_target(1.0 - new_gripper_value)  # Invert for Franka convention
+            self.gripper_rate.sleep()
+            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
+            self.prev_grasp_value = new_gripper_value
+
+        # Update button state for next iteration
+        self.prev_button_pressed = button_pressed
+
+        self.arm_rate.sleep()
+
+    def run(self, n_steps: int = None):
+        """Execute intervention-enabled control with recording state management.
+
+        Args:
+            n_steps: Not used in this mode (runs indefinitely until Ctrl+C)
+
+        State Machine:
+        1. Check for 'x' and 'r' keys (recording control)
+        2. If RECORDING:
+           - POLICY_MODE: Execute policy, monitor spacemouse for intervention
+           - INTERVENTION_MODE: Execute spacemouse, monitor 'i' key for resume
+        3. If not RECORDING: Wait for commands
+        """
+        from crisp_py.spacemouse import Spacemouse
+
+        # Setup
+        self._setup_keyboard_listener()
+        self._setup_intervention_publisher()
+
+        policy_iter = 0  # Track policy iterations (for observation cycles)
+
+        print("\n" + "="*60)
+        print("INTERVENTION + RECORDING MODE ACTIVE")
+        print("="*60)
+        print("Controls:")
+        print("  'x' - Reset to start position (not_ready -> ready)")
+        print("  'r' - Toggle recording (ready <-> recording)")
+        print("  Spacemouse - Automatic intervention during recording")
+        print("  'i' - Resume policy from intervention")
+        print("  Ctrl+C - Exit")
+        print("="*60)
+        print(f"\nInitial state: {self.recording_state}")
+        print("="*60 + "\n")
+
+        try:
+            with Spacemouse(deadzone=self.DEADZONE) as sm:
+                self.spacemouse = sm
+
+                # Policy state (only used when RECORDING)
+                current_actions = None
+                action_idx = 0
+
+                while True:
+                    iter_start = time.time()
+
+                    # Always check for 'x' key (reset to start)
+                    if self._check_key_command('x'):
+                        if self.recording_state == self.NOT_READY:
+                            self._handle_reset_to_start()
+                        else:
+                            print(f"[WARNING] Reset only allowed in 'not_ready' state (current: {self.recording_state})")
+
+                    # Always check for 'r' key (toggle recording)
+                    if self._check_key_command('r'):
+                        if self.recording_state in [self.READY, self.RECORDING]:
+                            self._handle_recording_toggle()
+                            # Reset policy state when toggling
+                            current_actions = None
+                            action_idx = 0
+                        else:
+                            print(f"[WARNING] Recording toggle not allowed in 'not_ready' state")
+
+                    # Execute policy/intervention only when RECORDING
+                    if self.recording_state == self.RECORDING:
+                        # STATE: POLICY_MODE
+                        if self.mode == self.POLICY_MODE:
+                            # Get new actions if needed
+                            if current_actions is None or action_idx >= len(current_actions):
+                                obs_dict = self._get_observation()
+                                current_actions = self.policy_client.predict_action(obs_dict)
+                                action_idx = 0
+                                policy_iter += 1
+                                print(f"\n[POLICY #{policy_iter}] Got {len(current_actions)} actions")
+
+                            # Execute next action
+                            action = current_actions[action_idx].copy()
+                            # Calculate deltas for monitoring (before executing action)
+                            from std_msgs.msg import Int32MultiArray
+
+                            # Convert action to get the target pose
+                            action_copy = action.copy()
+                            action_converted, gripper_pose = convert_action_from_fingertip_to_gripper(
+                                action_copy, self.rotation_transformer
+                            )
+
+                            # Position deltas
+                            new_position = action_converted[:3]
+                            prev_position = self.target_pose.position
+                            dx = new_position[0] - prev_position[0]
+                            dy = new_position[1] - prev_position[1]
+                            dz = new_position[2] - prev_position[2]
+
+                            # Rotation deltas
+                            prev_euler = self.target_pose.orientation.as_euler('XYZ')
+                            new_euler = gripper_pose.as_euler('XYZ')
+                            droll = new_euler[0] - prev_euler[0]
+                            dpitch = new_euler[1] - prev_euler[1]
+                            dyaw = new_euler[2] - prev_euler[2]
+
+                            # Convert to discrete signals (sign only)
+                            dx_int = (1 if dx > 0 else -1 if dx < 0 else 0)
+                            dy_int = (1 if dy > 0 else -1 if dy < 0 else 0)
+                            dz_int = (1 if dz > 0 else -1 if dz < 0 else 0)
+                            droll_int = (1 if droll > 0 else -1 if droll < 0 else 0)
+                            dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
+                            dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
+
+                            # Extract gripper value
+                            grasp_value = int(np.round(np.clip(action[-1], 0, 1)))
+
+                            # Publish policy action state with deltas and gripper value
+                            msg = Int32MultiArray()
+                            # Format: [state, dx, dy, dz, droll, dpitch, dyaw, gripper, reset]
+                            # state=1 means policy action
+                            msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_value, 0]
+                            self.intervention_pub.publish(msg)
+
+                            self._execute_action(action)
+                            time.sleep(1/self.ctrl_freq)  # Maintain control frequency
+                            action_idx += 1
+
+                            # Check for intervention trigger
+                            motion = sm.get_motion_state_transformed()
+                            if self._check_for_intervention_trigger(motion):
+                                print(f"\n{'='*60}")
+                                print("[INTERVENTION TRIGGERED] Spacemouse movement detected!")
+                                print(f"{'='*60}")
+                                self.mode = self.INTERVENTION_MODE
+                                # Initialize intervention target from current pose
+                                self.intervention_target_pose = self.robot.end_effector_pose.copy()
+                                # Invalidate current actions (will get fresh observation on resume)
+                                current_actions = None
+                                action_idx = 0
+                                continue
+
+                            iter_total = time.time() - iter_start
+                            print(f"[RECORDING/POLICY] Action {action_idx}: {iter_total*1000:.1f} ms")
+
+                        # STATE: INTERVENTION_MODE
+                        elif self.mode == self.INTERVENTION_MODE:
+                            # Execute spacemouse control
+                            self._execute_intervention_step(sm)
+
+                            # Check for resume request
+                            if self._check_key_command('i'):
+                                print(f"\n{'='*60}")
+                                print("[RESUMING POLICY] Getting observation from current pose...")
+                                print(f"{'='*60}")
+                                self.mode = self.POLICY_MODE
+                                # Sync target_pose with current intervention target
+                                self.target_pose = self.intervention_target_pose.copy()
+                                # Will get fresh observation on next iteration
+                                continue
+                    else:
+                        # Not recording, publish idle state and sleep briefly
+                        self._publish_intervention_state(0)
+                        time.sleep(0.1)
+
+        except KeyboardInterrupt:
+            print("\n\nRecording stopped by user")
+        finally:
+            self._cleanup()
+
 
 class ChunkingController(RobotController):
     """Controller with action buffering and policy_delay offset."""
@@ -752,7 +1176,7 @@ def create_controller(mode: str, *args, **kwargs) -> RobotController:
     """Factory function to create controller based on mode.
 
     Args:
-        mode: Controller mode ('simple', 'chunking', 'blending')
+        mode: Controller mode ('simple', 'chunking', 'blending', 'intv')
         *args, **kwargs: Arguments passed to controller constructor
 
     Returns:
@@ -764,5 +1188,7 @@ def create_controller(mode: str, *args, **kwargs) -> RobotController:
         return ChunkingController(*args, **kwargs)
     elif mode == 'blending':
         return BlendingChunkingController(*args, **kwargs)
+    elif mode == 'intv':
+        return InterventionController(*args, **kwargs)
     else:
         raise ValueError(f"Unknown controller mode: {mode}")
