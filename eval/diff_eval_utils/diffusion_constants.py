@@ -7,7 +7,7 @@ import numpy as np
 # Robot-specific constants
 FINGER_HAND_OFFSET = 0.06  # Distance from finger tip to gripper base along z-axis
 GRIPPER_NORM_CONST = 0.05  # Normalization constant for gripper value
-START_POSITION = np.array([0.60, 0., 0.32 + FINGER_HAND_OFFSET])
+START_POSITION = np.array([0.55, 0., 0.25 + FINGER_HAND_OFFSET])
 
 JOINT_THRESHOLDS = {
     "panda_link0": 0.08,
@@ -39,17 +39,27 @@ class DPEvalConfig:
         )
     )
 
+    home_joint_position: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [0.0015795138042423453, 0.11460111156789562, 0.00012723805921852443, -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.7848162419679248]
+        )
+    )
+
+
+
     # Control parameters
-    ctrl_freq: float = 5.0
+    ctrl_freq: float = 7.0
     n_steps: int = 40
 
     # Controller mode: 'simple', 'chunking', 'blending', 'intv'
     mode: str = 'simple'
 
-    # Chunking parameters (used when mode != 'simple')
-    policy_delay: int = 4
     horizon: int = 16
-    action_exec_size: int = 10
+
+    # Chunking parameters (used when mode != 'simple')
+    policy_delay: int = 3
+    action_exec_size: int = 8
+
 
     # Blending parameters (only when mode == 'blending')
     merge_range: int = 4
@@ -59,9 +69,13 @@ class DPEvalConfig:
     debug_output_dir: Path = field(default_factory=lambda: Path("debug_plots"))
     visualize: bool = False
 
+    # Debug data saving
+    save_debug_data: bool = False
+    save_pcd_format: str = 'npy'  # 'npy' or 'ply'
+
     # External paths
-    toolbox_path: str = '/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox'
     diffusion_policy_path: str = '/home/mingxi/mingxi_ws/handpi/diffusion_policy'
+    toolbox_path: str = diffusion_policy_path + '/robotool'
 
     def __post_init__(self):
         """Validate configuration."""
@@ -87,7 +101,6 @@ class DPEvalConfig:
         return cls(
             mode=args.mode,
             n_steps=args.n_steps,
-            ctrl_freq=args.ctrl_freq,
             debug_plotting=args.debug_plotting,
             policy_server_port=args.policy_port,
             pcd_server_port=args.pcd_port,

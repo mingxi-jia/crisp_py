@@ -45,6 +45,8 @@ class PolicyClient:
         # Encode observations as base64
         data = {}
         for key, value in obs_dict.items():
+            if key in ['pcd_timestamp']:
+                continue
             array_bytes = value.tobytes()
             array_b64 = base64.b64encode(array_bytes).decode('utf-8')
             data[key] = {

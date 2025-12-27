@@ -7,7 +7,7 @@ from sensor_msgs.msg import JointState
 class JointStateSubscriber:
     """A simple ROS2 subscriber to get joint states from /joint_states topic."""
 
-    def __init__(self, node, joint_names: list[str], topic: str = "/joint_states"):
+    def __init__(self, node, topic: str = "/joint_states"):
         """Initialize the joint state subscriber.
 
         Args:

@@ -21,5 +21,8 @@ tests/unit/__pycache__
 
 *.pkl
 *.pyc
+*.pth 
 
 raw_datasets
+debug_data/*
+debug_plots/*

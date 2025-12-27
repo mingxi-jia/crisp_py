@@ -21,7 +21,6 @@ from scipy.spatial.transform import Rotation as R
 import open3d as o3d
 
 # Add external dependencies
-sys.path.append('/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox')
 sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
 
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer

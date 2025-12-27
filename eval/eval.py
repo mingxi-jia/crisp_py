@@ -31,23 +31,19 @@ import rclpy
 import numpy as np
 
 from crisp_py.camera.pointcloud import PointCloudManager
-from crisp_py.robot import Robot
+from crisp_py.robot import Robot, Pose
 from crisp_py.robot_config import FrankaConfig
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
-# Add external dependencies
-sys.path.append('/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox')
-sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
+from scipy.spatial.transform import Rotation as R
 
-from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-from robot_filter.arm_segmentor import RobotArmSegmentation
 
 # Import our utilities
 from diff_eval_utils.diffusion_constants import DPEvalConfig, START_POSITION
 from diff_eval_utils.diffusion_clients import PolicyClient, PcdProcessingClient, DirectPolicyWrapper
 from diff_eval_utils.diffusion_controllers import create_controller
 from diff_eval_utils.ros_utils import JointStateSubscriber
-from diff_eval_utils.diffusion_visualization import visualize_robot_pcd, np2o3d
+# from diff_eval_utils.diffusion_visualization import visualize_robot_pcd, np2o3d
 
 
 def parse_args():
@@ -71,14 +67,7 @@ def parse_args():
         default=40,
         help='Number of control steps to execute'
     )
-
-    parser.add_argument(
-        '--ctrl-freq',
-        type=float,
-        default=10.0,
-        help='Control frequency in Hz'
-    )
-
+    
     parser.add_argument(
         '--debug-plotting',
         action='store_true',
@@ -88,7 +77,7 @@ def parse_args():
     parser.add_argument(
         '--policy-port',
         type=int,
-        default=5000,
+        default=6666,
         help='Policy server port'
     )
 
@@ -126,6 +115,19 @@ def parse_args():
 
     return parser.parse_args()
 
+class MyRobot(Robot):
+    def __init__(self, gripper, **kwargs):
+        super().__init__(**kwargs)
+        self.my_gripper = gripper
+ 
+    def home(self):
+        super().home()
+        init_pose = Pose(
+            position=START_POSITION,
+            orientation=R.from_euler("XYZ", [np.pi, np.pi/12, 0], degrees=False),
+        )
+        self.move_to(pose=init_pose, speed=0.15)
+        self.my_gripper.set_target(1.0)
 
 def setup_robot(config: DPEvalConfig):
     """Initialize robot and move to home position.
@@ -136,9 +138,13 @@ def setup_robot(config: DPEvalConfig):
     Returns:
         Initialized Robot instance
     """
+    gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
+    gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
+    gripper.wait_until_ready()
+
     config_franka = FrankaConfig()
     config_franka.home_config = config.home_joint_position
-    robot = Robot(namespace="", robot_config=config_franka)
+    robot = MyRobot(gripper=gripper, namespace="", robot_config=config_franka)
     robot.wait_until_ready()
     print(f"Robot ready. Joint values: {robot.joint_values}")
     print(f"End effector pose: {robot.end_effector_pose}")
@@ -154,23 +160,7 @@ def setup_robot(config: DPEvalConfig):
     # print("Moving to start position...")
     # robot.move_to(position=START_POSITION, speed=0.15)
 
-    return robot
-
-
-def setup_gripper():
-    """Initialize gripper.
-
-    Returns:
-        Initialized Gripper instance
-    """
-    gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
-    gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
-    gripper.wait_until_ready()
-    gripper.set_target(1.0)
-    print("Gripper ready")
-
-    return gripper
-
+    return robot, gripper
 
 def setup_point_cloud_manager(toolbox_path: str):
     """Initialize point cloud manager and joint state subscriber.
@@ -185,10 +175,7 @@ def setup_point_cloud_manager(toolbox_path: str):
     print(f"Loading point cloud manager with config: {config_path}")
     manager = PointCloudManager(config_path)
 
-    # Get joint names from URDF
-    temp_robot_seg = RobotArmSegmentation()
-    joint_names = sorted([j.name for j in temp_robot_seg.robot_urdf.actuated_joints])
-    joint_state_subscriber = JointStateSubscriber(manager, joint_names, topic="/joint_states")
+    joint_state_subscriber = JointStateSubscriber(manager, topic="/joint_states")
 
     # Spin in background thread
     spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
@@ -197,7 +184,6 @@ def setup_point_cloud_manager(toolbox_path: str):
     # Wait for joint states
     while not joint_state_subscriber.is_ready:
         time.sleep(0.1)
-    print(f"Joint state subscriber ready. Joint names: {joint_names}")
 
     return manager, joint_state_subscriber, spin_thread
 
@@ -240,7 +226,8 @@ def pcd_inspect(config: DPEvalConfig):
     # Create rate for observation loop
     rate = robot.node.create_rate(1.0)  # 1 Hz for inspection
 
-    robot.move_to(position=[0.6, 0.0, 0.25], speed=0.1)
+    robot.move_to(position=[0.6, 0.0, 0.3], pose=R.from_euler('XYZ', [0, np.pi/12, 0]), speed=0.1)
+
 
     print("\n" + "="*60)
     print("Starting observation visualization loop...")
@@ -302,7 +289,7 @@ def pcd_inspect(config: DPEvalConfig):
                     pcd_vis.points = o3d.utility.Vector3dVector(processed_pcd[:, :3])
                     pcd_vis.colors = o3d.utility.Vector3dVector(processed_pcd[:, 3:])
                     
-                    robot_pcd = visualize_robot_pcd(processed_pcd, None, joint_state=joint_positions[1:])
+                    # robot_pcd = visualize_robot_pcd(processed_pcd, None, joint_state=joint_positions[1:])
                     # robot_pcd = np2o3d(robot_pcd)
                     o3d.visualization.draw_geometries([pcd_vis], window_name=f"Step {step}: Point Cloud")
 
@@ -321,6 +308,10 @@ def main():
     """Main entry point."""
     args = parse_args()
     config = DPEvalConfig.from_cli_args(args)
+    sys.path.append(config.toolbox_path)
+    sys.path.append(config.diffusion_policy_path)
+
+    from diffusion_policy.model.common.rotation_transformer import RotationTransformer
 
     # Validate arguments
     if args.direct_policy and not args.ckpt_path:
@@ -369,11 +360,8 @@ def main():
         rotation_transformer = RotationTransformer(from_rep='rotation_6d', to_rep='matrix')
 
         # Setup hardware
-        print("\nInitializing gripper...")
-        gripper = setup_gripper()
-
         print("\nInitializing robot...")
-        robot = setup_robot(config)
+        robot, gripper = setup_robot(config)
 
         print("\nInitializing sensors...")
         manager, joint_state_subscriber, _ = setup_point_cloud_manager(config.toolbox_path)

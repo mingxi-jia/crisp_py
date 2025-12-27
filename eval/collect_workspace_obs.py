@@ -30,11 +30,10 @@ from crisp_py.robot import Robot
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 # Add external dependencies
-sys.path.append('/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox')
 sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
 
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-from robot_filter.arm_segmentor import RobotArmSegmentation
+from robotool.robot_filter.arm_segmentor import RobotArmSegmentation
 
 # Import our utilities
 from diff_eval_utils.diffusion_transforms import (
@@ -301,7 +300,7 @@ def main():
     # Setup point cloud manager and joint state subscriber
     print("\nInitializing sensors...")
     manager, joint_state_subscriber, _ = setup_point_cloud_manager(
-        '/home/mingxi/mingxi_ws/handpi/robot-vision-toolbox'
+        
     )
 
     # Setup PCD processing client

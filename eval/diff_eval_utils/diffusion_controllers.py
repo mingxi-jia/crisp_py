@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 import threading
 import shutil
+from datetime import datetime
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 from matplotlib import cm, ticker
@@ -16,7 +17,7 @@ from .diffusion_transforms import (
     franka_obs_to_diff_obs
 )
 from .diffusion_constants import GRIPPER_NORM_CONST
-
+from std_msgs.msg import Int32MultiArray
 
 class RobotController(ABC):
     """Abstract base class for robot controllers."""
@@ -76,16 +77,45 @@ class RobotController(ABC):
             self.obs_manager, eef_pose, gripper_state,
              joint_state, visualize=self.config.visualize
         )
+        # from diff_eval_utils.diffusion_visualization import visualize_pcd
+        # visualize_pcd(obs_dict['pcd'])
+
+
 
         return obs_dict
 
-    def _execute_action(self, action):
+    def _execute_action(self, action, move_to=False):
         """Execute a single action.
 
         Args:
             action: 10-element action array [x, y, z, rot6d(6), grasp(1)]
         """
         action, gripper_pose = convert_action_from_fingertip_to_gripper(action, self.rotation_transformer)
+
+        # Collect debug data if enabled
+        if hasattr(self, 'debug_data_collection') and self.debug_data_collection is not None:
+            timestamp_ms = int(time.time() * 1000)
+
+            # Save executed action (before transformations)
+            self.debug_data_collection['executed_actions'].append(
+                (timestamp_ms, action.copy())
+            )
+
+            # Save EEF pose
+            current_pose = self.robot.end_effector_pose
+            pose_dict = {
+                'position': current_pose.position.copy(),
+                'orientation_quat': current_pose.orientation.as_quat().copy(),
+                'orientation_matrix': current_pose.orientation.as_matrix().copy()
+            }
+            self.debug_data_collection['eef_poses'].append(
+                (timestamp_ms, pose_dict)
+            )
+
+            # Save actual EEF position
+            self.debug_data_collection['actual_eef_pos'].append(
+                (timestamp_ms, current_pose.position.copy())
+            )
 
         # Safety check: verify pose change is reasonable
         new_position = action[:3]
@@ -113,8 +143,11 @@ class RobotController(ABC):
         self.target_pose.position = new_position
         # self.target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
         self.target_pose.orientation = gripper_pose
-        self.robot.set_target(pose=self.target_pose)
-        self.arm_rate.sleep()
+        if not move_to:
+            self.robot.set_target(pose=self.target_pose)
+            self.arm_rate.sleep()
+        else:
+            self.robot.move_to(pose=self.target_pose, speed=0.15)
 
         grasp_value = np.round(np.clip(action[-1], 0, 1))
         if grasp_value != self.prev_grasp_value:
@@ -122,6 +155,12 @@ class RobotController(ABC):
             self.gripper_rate.sleep()
             time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
         self.prev_grasp_value = grasp_value
+
+    def _switch_to_impedance_controller(self):
+        self.robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+        self.robot.cartesian_controller_parameters_client.load_param_config(
+            file_path="config/control/spacemouse_cartesian_impedance.yaml"
+        )
 
 
 class SimpleSequentialController(RobotController):
@@ -161,8 +200,7 @@ class InterventionController(SimpleSequentialController):
     Two-layer State Machine:
 
     Recording States (outer layer):
-    - NOT_READY: Robot is not ready to record
-    - READY: Robot is at start position, ready to start
+    - READY: Robot is at start position, ready to start recording
     - RECORDING: Policy/intervention active
 
     Policy States (inner layer, only active when RECORDING):
@@ -170,8 +208,9 @@ class InterventionController(SimpleSequentialController):
     - INTERVENTION_MODE: Follow spacemouse input (human takeover)
 
     Key Controls:
-    - 'x': Reset to start position (NOT_READY → READY)
-    - 'r': Toggle recording (READY ↔ RECORDING)
+    - 'r': Toggle recording
+        - When RECORDING: Stop control, reset to start position → READY
+        - When READY: Start policy inference → RECORDING
     - 'i': Resume policy from intervention (INTERVENTION → POLICY)
     - Spacemouse: Automatic intervention trigger (POLICY → INTERVENTION)
     """
@@ -184,7 +223,6 @@ class InterventionController(SimpleSequentialController):
         super().__init__(*args, **kwargs)
 
         # Recording state machine (outer layer)
-        self.NOT_READY = 'not_ready'
         self.READY = 'ready'
         self.RECORDING = 'recording'
         self.recording_state = self.READY  # Start in READY mode
@@ -198,7 +236,7 @@ class InterventionController(SimpleSequentialController):
         self.spacemouse = None
 
         # Keyboard listener state
-        self.key_commands = {'x': False, 'r': False, 'i': False}
+        self.key_commands = {'r': False, 'i': False}
         self.listener_lock = threading.Lock()
         self.keyboard_listener = None
 
@@ -211,18 +249,22 @@ class InterventionController(SimpleSequentialController):
         # Gripper button state tracking
         self.prev_button_pressed = False
 
+        # Timing tracking for visualization
+        self.timing_events = []  # List of (timestamp, event_type) tuples
+        self.start_recording_time = None
+
+        # Action recording for debugging
+        self.recorded_actions = []  # List of executed actions
+
     def _setup_keyboard_listener(self):
-        """Initialize keyboard listener for 'x', 'r', and 'i' keys."""
+        """Initialize keyboard listener for 'r' and 'i' keys."""
         from pynput import keyboard
 
         def on_press(key):
             with self.listener_lock:
                 try:
                     if hasattr(key, 'char'):
-                        if key.char == 'x':
-                            self.key_commands['x'] = True
-                            print("\n[KEY: x] Reset to start position requested...")
-                        elif key.char == 'r':
+                        if key.char == 'r':
                             self.key_commands['r'] = True
                             print("\n[KEY: r] Recording toggle requested...")
                         elif key.char == 'i':
@@ -234,8 +276,7 @@ class InterventionController(SimpleSequentialController):
         self.keyboard_listener = keyboard.Listener(on_press=on_press)
         self.keyboard_listener.start()
         print("Keyboard listener started:")
-        print("  'x' - Reset to start position (not_ready -> ready)")
-        print("  'r' - Toggle recording (ready <-> recording)")
+        print("  'r' - Toggle recording (ready <-> recording, with reset)")
         print("  'i' - Resume policy from intervention")
 
     def _setup_intervention_publisher(self):
@@ -284,7 +325,7 @@ class InterventionController(SimpleSequentialController):
         """Check if a key command was triggered and reset flag.
 
         Args:
-            key: Key to check ('x', 'r', or 'i')
+            key: Key to check ('r' or 'i')
 
         Returns:
             bool: True if key was pressed
@@ -295,27 +336,8 @@ class InterventionController(SimpleSequentialController):
                 return True
         return False
 
-    def _handle_reset_to_start(self):
-        """Handle 'x' key press: reset robot to start position."""
-        from .diffusion_constants import START_POSITION
-
-        print(f"\n{'='*60}")
-        print("[RESET] Moving robot to start position...")
-        print(f"{'='*60}")
-        self.robot.home()
-        self.robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
-        self.robot.cartesian_controller_parameters_client.load_param_config(
-            file_path="config/control/default_cartesian_impedance.yaml"
-        )
-
-
-        # Transition to READY
-        self.recording_state = self.READY
-        print(f"[STATE] not_ready -> ready")
-        print(f"{'='*60}\n")
-
     def _handle_recording_toggle(self):
-        """Handle 'r' key press: toggle between ready/recording states."""
+        """Handle 'r' key press: toggle between ready/recording states with reset."""
         if self.recording_state == self.READY:
             # Start recording: READY -> RECORDING
             print(f"\n{'='*60}")
@@ -324,23 +346,47 @@ class InterventionController(SimpleSequentialController):
 
             self.recording_state = self.RECORDING
             self.mode = self.POLICY_MODE  # Reset to policy mode
+            self.intervention_target_pose = self.robot.end_effector_pose.copy()
+
+            # Reset timing tracking
+            self.timing_events = []
+            self.start_recording_time = time.time()
+
+            # Reset action recording
+            self.recorded_actions = []
 
             print(f"[STATE] ready -> recording (policy mode)")
             print(f"{'='*60}\n")
 
         elif self.recording_state == self.RECORDING:
-            # Stop recording: RECORDING -> NOT_READY
+            # Stop recording and reset: RECORDING -> READY
             print(f"\n{'='*60}")
-            print("[STOP RECORDING] Stopping robot actions...")
+            print("[STOP RECORDING] Stopping robot actions and resetting to start position...")
             print(f"{'='*60}")
 
-            self.recording_state = self.NOT_READY
+            # Generate timing visualization
+            if len(self.timing_events) > 0:
+                self._plot_timing_events()
+
+            # Save recorded actions to .npy file
+            if len(self.recorded_actions) > 0:
+                self._save_recorded_actions()
+
+            # Reset robot to start position
+            self.robot.home()
+            self._switch_to_impedance_controller()
+
+            # Update target_pose to match the new robot position after homing
+            self.target_pose = self.robot.end_effector_pose.copy()
+            self.intervention_target_pose = self.target_pose.copy()
+            # Transition to READY
+            self.recording_state = self.READY
             self.mode = self.POLICY_MODE  # Reset to policy mode
 
-            print(f"[STATE] recording -> not_ready")
+            print(f"[STATE] recording rr-> ready (robot reset)")
             print(f"{'='*60}\n")
 
-    def _execute_intervention_step(self, spacemouse):
+    def _execute_intervention_step(self, spacemouse, recording=True):
         """Execute one step of spacemouse control.
 
         Args:
@@ -359,7 +405,7 @@ class InterventionController(SimpleSequentialController):
         # Publish intervention signals (always publish during intervention mode)
         has_movement = (dx != 0 or dy != 0 or dz != 0 or droll != 0 or dpitch != 0 or dyaw != 0)
 
-        if has_movement or gripper_toggle:
+        if (has_movement or gripper_toggle) and recording:
             # Publish intervention signals (for data collection/logging)
             msg = Int32MultiArray()
             # Convert to discrete signals (sign only)
@@ -373,7 +419,10 @@ class InterventionController(SimpleSequentialController):
             # state=2 means intervention action
             msg.data = [2, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, gripper_toggle, 0]
             self.intervention_pub.publish(msg)
-
+        else:
+            self._publish_intervention_state(0)
+            return
+        
         # Update target pose
         curr_pos = self.intervention_target_pose.position
         curr_euler = self.intervention_target_pose.orientation.as_euler('XYZ')
@@ -386,9 +435,9 @@ class InterventionController(SimpleSequentialController):
         ])
 
         new_euler = np.array([
-            curr_euler[0] + droll,
-            curr_euler[1] + dpitch,
-            curr_euler[2] - dyaw * 2  # Match spacemouse_example.py convention
+            curr_euler[0] + droll * 2,
+            curr_euler[1] - dpitch * 2,
+            curr_euler[2] - dyaw * 6  # Match spacemouse_example.py convention
         ])
 
         # Update and send to robot
@@ -416,6 +465,154 @@ class InterventionController(SimpleSequentialController):
 
         self.arm_rate.sleep()
 
+    def _execute_action(self, action, move_to=False):
+        """Execute a single action.
+
+        Args:
+            action: 10-element action array [x, y, z, rot6d(6), grasp(1)]
+        """
+        action, gripper_pose = convert_action_from_fingertip_to_gripper(action, self.rotation_transformer)
+
+        # Position deltas
+        new_position = action[:3]
+        prev_position = self.target_pose.position
+        dx = new_position[0] - prev_position[0]
+        dy = new_position[1] - prev_position[1]
+        dz = new_position[2] - prev_position[2]
+
+        # Rotation deltas
+        prev_euler = self.target_pose.orientation.as_euler('XYZ')
+        new_euler = gripper_pose.as_euler('XYZ')
+        droll = new_euler[0] - prev_euler[0]
+        dpitch = new_euler[1] - prev_euler[1]
+        dyaw = new_euler[2] - prev_euler[2]
+
+        # Convert to discrete signals (sign only)
+        dx_int = (1 if dx > 0 else -1 if dx < 0 else 0)
+        dy_int = (1 if dy > 0 else -1 if dy < 0 else 0)
+        dz_int = (1 if dz > 0 else -1 if dz < 0 else 0)
+        droll_int = (1 if droll > 0 else -1 if droll < 0 else 0)
+        dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
+        dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
+
+        # Extract gripper value
+        grasp_value = int(np.round(np.clip(action[-1], 0, 1)))
+
+        # Publish policy action state with deltas and gripper value
+        msg = Int32MultiArray()
+        # Format: [state, dx, dy, dz, droll, dpitch, dyaw, gripper, reset]
+        # state=1 means policy action
+        msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_value, 0]
+
+
+        self.intervention_pub.publish(msg)
+
+        # Record message encoding timing
+        self.timing_events.append((time.time(), 'message_sent'))
+
+        # Record action for debugging
+        self.recorded_actions.append(action.copy())
+
+        self.target_pose.position = new_position
+        # self.target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
+        self.target_pose.orientation = gripper_pose
+        if not move_to:
+            self.robot.set_target(pose=self.target_pose)
+            self.arm_rate.sleep()
+        else:
+            self.robot.move_to(pose=self.target_pose, speed=0.15)
+
+        grasp_value = np.round(np.clip(action[-1], 0, 1))
+        if grasp_value != self.prev_grasp_value:
+            self.gripper.set_target(1 - grasp_value)
+            self.gripper_rate.sleep()
+            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
+        self.prev_grasp_value = grasp_value
+
+    def _save_recorded_actions(self):
+        """Save recorded actions to .npy file with timestamp."""
+        from datetime import datetime
+
+        # Create debug_data directory if it doesn't exist
+        debug_dir = Path('debug_data')
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate timestamp-based filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = debug_dir / f'actions_{timestamp}.npy'
+
+        # Convert to numpy array and save
+        actions_array = np.array(self.recorded_actions)
+        np.save(filename, actions_array)
+
+        print(f"\nRecorded actions saved to: {filename.absolute()}")
+        print(f"Total actions saved: {len(self.recorded_actions)}")
+
+    def _plot_timing_events(self):
+        """Generate timing visualization plot."""
+        print("\nGenerating timing events visualization...")
+
+        # Convert timing events to arrays
+        timestamps = np.array([t - self.start_recording_time for t, _ in self.timing_events])
+        event_types = [event_type for _, event_type in self.timing_events]
+
+        # Map event types to numeric values for plotting
+        event_map = {
+            'inference_done': 0,
+            'message_sent': 1,
+            'action_executed': 2
+        }
+
+        # Create plot
+        fig, ax = plt.subplots(figsize=(16, 7))
+
+        # Plot events with vertical lines and time differences
+        colors = {'inference_done': 'red', 'message_sent': 'orange', 'action_executed': 'green'}
+
+        for event_type, y_val in event_map.items():
+            mask = [e == event_type for e in event_types]
+            event_times = timestamps[mask]
+
+            if len(event_times) > 0:
+                # Plot scatter points
+                ax.scatter(event_times, [y_val] * len(event_times),
+                          c=colors[event_type], s=80, alpha=0.8, label=event_type, zorder=3)
+
+                # Draw vertical lines to x-axis
+                for t in event_times:
+                    ax.plot([t, t], [y_val, -0.3], color=colors[event_type],
+                           alpha=0.3, linewidth=1, zorder=1)
+
+                # Add time difference labels between consecutive events
+                for i in range(1, len(event_times)):
+                    time_diff = (event_times[i] - event_times[i-1]) * 1000  # Convert to ms
+                    mid_time = (event_times[i] + event_times[i-1]) / 2
+                    ax.text(mid_time, y_val + 0.15, f'{time_diff:.1f}ms',
+                           ha='center', va='bottom', fontsize=8,
+                           color=colors[event_type], weight='bold')
+
+        # Configure axes with finer granularity
+        ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Event Type', fontsize=12, fontweight='bold')
+        ax.set_yticks(list(event_map.values()))
+        ax.set_yticklabels(list(event_map.keys()))
+        ax.set_ylim(-0.5, 2.5)
+
+        # Finer x-axis ticks
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
+        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
+
+        ax.set_title('Policy Execution Timing Events', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='x', which='major')
+        ax.grid(True, alpha=0.15, axis='x', which='minor', linestyle=':')
+        ax.legend(loc='upper right', fontsize=10)
+
+        plt.tight_layout()
+        filename = Path('debug_plots/timing_events.png')
+        plt.savefig(filename, dpi=150, bbox_inches='tight')
+        print(f"Timing events plot saved to: {filename.absolute()}")
+        plt.close()
+
     def run(self, n_steps: int = None):
         """Execute intervention-enabled control with recording state management.
 
@@ -423,11 +620,11 @@ class InterventionController(SimpleSequentialController):
             n_steps: Not used in this mode (runs indefinitely until Ctrl+C)
 
         State Machine:
-        1. Check for 'x' and 'r' keys (recording control)
+        1. Check for 'r' key (recording control with reset)
         2. If RECORDING:
            - POLICY_MODE: Execute policy, monitor spacemouse for intervention
            - INTERVENTION_MODE: Execute spacemouse, monitor 'i' key for resume
-        3. If not RECORDING: Wait for commands
+        3. If READY: Wait for 'r' to start recording
         """
         from crisp_py.spacemouse import Spacemouse
 
@@ -441,8 +638,7 @@ class InterventionController(SimpleSequentialController):
         print("INTERVENTION + RECORDING MODE ACTIVE")
         print("="*60)
         print("Controls:")
-        print("  'x' - Reset to start position (not_ready -> ready)")
-        print("  'r' - Toggle recording (ready <-> recording)")
+        print("  'r' - Toggle recording (ready <-> recording, with reset)")
         print("  Spacemouse - Automatic intervention during recording")
         print("  'i' - Resume policy from intervention")
         print("  Ctrl+C - Exit")
@@ -457,84 +653,44 @@ class InterventionController(SimpleSequentialController):
                 # Policy state (only used when RECORDING)
                 current_actions = None
                 action_idx = 0
+                self.intervention_target_pose = self.robot.end_effector_pose.copy()
 
                 while True:
                     iter_start = time.time()
 
-                    # Always check for 'x' key (reset to start)
-                    if self._check_key_command('x'):
-                        if self.recording_state == self.NOT_READY:
-                            self._handle_reset_to_start()
-                        else:
-                            print(f"[WARNING] Reset only allowed in 'not_ready' state (current: {self.recording_state})")
-
-                    # Always check for 'r' key (toggle recording)
+                    # Check for 'r' key (toggle recording with reset)
                     if self._check_key_command('r'):
-                        if self.recording_state in [self.READY, self.RECORDING]:
-                            self._handle_recording_toggle()
-                            # Reset policy state when toggling
-                            current_actions = None
-                            action_idx = 0
-                        else:
-                            print(f"[WARNING] Recording toggle not allowed in 'not_ready' state")
+                        self._handle_recording_toggle()
+                        # Reset policy state when toggling
+                        current_actions = None
+                        action_idx = 0
+
+                    recording = self.recording_state == self.RECORDING
 
                     # Execute policy/intervention only when RECORDING
-                    if self.recording_state == self.RECORDING:
+                    if self.mode == self.POLICY_MODE:
+                        if recording:
                         # STATE: POLICY_MODE
-                        if self.mode == self.POLICY_MODE:
                             # Get new actions if needed
-                            if current_actions is None or action_idx >= len(current_actions):
+                            if current_actions is None or action_idx >= self.config.action_exec_size:
+                                self._publish_intervention_state(0)
                                 obs_dict = self._get_observation()
                                 current_actions = self.policy_client.predict_action(obs_dict)
                                 action_idx = 0
                                 policy_iter += 1
                                 print(f"\n[POLICY #{policy_iter}] Got {len(current_actions)} actions")
 
+                                # Record inference timing
+                                self.timing_events.append((time.time(), 'inference_done'))
+
                             # Execute next action
                             action = current_actions[action_idx].copy()
                             # Calculate deltas for monitoring (before executing action)
-                            from std_msgs.msg import Int32MultiArray
 
-                            # Convert action to get the target pose
-                            action_copy = action.copy()
-                            action_converted, gripper_pose = convert_action_from_fingertip_to_gripper(
-                                action_copy, self.rotation_transformer
-                            )
+                            self._execute_action(action, move_to=False)
 
-                            # Position deltas
-                            new_position = action_converted[:3]
-                            prev_position = self.target_pose.position
-                            dx = new_position[0] - prev_position[0]
-                            dy = new_position[1] - prev_position[1]
-                            dz = new_position[2] - prev_position[2]
-
-                            # Rotation deltas
-                            prev_euler = self.target_pose.orientation.as_euler('XYZ')
-                            new_euler = gripper_pose.as_euler('XYZ')
-                            droll = new_euler[0] - prev_euler[0]
-                            dpitch = new_euler[1] - prev_euler[1]
-                            dyaw = new_euler[2] - prev_euler[2]
-
-                            # Convert to discrete signals (sign only)
-                            dx_int = (1 if dx > 0 else -1 if dx < 0 else 0)
-                            dy_int = (1 if dy > 0 else -1 if dy < 0 else 0)
-                            dz_int = (1 if dz > 0 else -1 if dz < 0 else 0)
-                            droll_int = (1 if droll > 0 else -1 if droll < 0 else 0)
-                            dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
-                            dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
-
-                            # Extract gripper value
-                            grasp_value = int(np.round(np.clip(action[-1], 0, 1)))
-
-                            # Publish policy action state with deltas and gripper value
-                            msg = Int32MultiArray()
-                            # Format: [state, dx, dy, dz, droll, dpitch, dyaw, gripper, reset]
-                            # state=1 means policy action
-                            msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_value, 0]
-                            self.intervention_pub.publish(msg)
-
-                            self._execute_action(action)
-                            time.sleep(1/self.ctrl_freq)  # Maintain control frequency
+                            # Record action execution timing
+                            self.timing_events.append((time.time(), 'action_executed'))
                             action_idx += 1
 
                             # Check for intervention trigger
@@ -544,6 +700,7 @@ class InterventionController(SimpleSequentialController):
                                 print("[INTERVENTION TRIGGERED] Spacemouse movement detected!")
                                 print(f"{'='*60}")
                                 self.mode = self.INTERVENTION_MODE
+                                
                                 # Initialize intervention target from current pose
                                 self.intervention_target_pose = self.robot.end_effector_pose.copy()
                                 # Invalidate current actions (will get fresh observation on resume)
@@ -554,11 +711,13 @@ class InterventionController(SimpleSequentialController):
                             iter_total = time.time() - iter_start
                             print(f"[RECORDING/POLICY] Action {action_idx}: {iter_total*1000:.1f} ms")
 
-                        # STATE: INTERVENTION_MODE
-                        elif self.mode == self.INTERVENTION_MODE:
-                            # Execute spacemouse control
-                            self._execute_intervention_step(sm)
-
+                    # STATE: INTERVENTION_MODE
+                    if self.mode == self.INTERVENTION_MODE or not recording:
+                        
+                        # Execute spacemouse control
+                        self._execute_intervention_step(sm, recording=recording)
+                        
+                        if recording:
                             # Check for resume request
                             if self._check_key_command('i'):
                                 print(f"\n{'='*60}")
@@ -569,7 +728,7 @@ class InterventionController(SimpleSequentialController):
                                 self.target_pose = self.intervention_target_pose.copy()
                                 # Will get fresh observation on next iteration
                                 continue
-                    else:
+                    if not recording:
                         # Not recording, publish idle state and sleep briefly
                         self._publish_intervention_state(0)
                         time.sleep(0.1)
@@ -602,6 +761,30 @@ class ChunkingController(RobotController):
         if self.config.debug_plotting:
             self._setup_debug_plotting()
 
+        # Debug data collection
+        if self.config.save_debug_data:
+            self.debug_data_collection = {
+                'action_chunks': [],      # (timestamp_ms, array(16,10))
+                'executed_actions': [],   # (timestamp_ms, array(10,))
+                'eef_poses': [],          # (timestamp_ms, pose_dict)
+                'point_clouds': [],       # (timestamp_ms, array(N,6))
+                'robot0_eef_pos': [],     # (timestamp_ms, array(3,))
+                'actual_eef_pos': [],     # (timestamp_ms, array(3,))
+                'pcd_timestamps': []     # (timestamp_ms, pcd_timestamp)
+            }
+        else:
+            self.debug_data_collection = None
+
+        # Live visualization
+        self.live_plot_fig = None
+        self.live_plot_ax = None
+        self.live_events = []  # List of (timestamp, event_type) tuples
+        self.start_time = None
+        self.last_plot_update_time = 0  # Track last update time
+        self.plot_update_interval = 1.0  # Update plot every 1 second
+        if self.config.visualize:
+            self._setup_live_plot()
+
     def _setup_debug_plotting(self):
         """Initialize debug plotting data structures."""
         if self.config.debug_output_dir.exists():
@@ -616,7 +799,10 @@ class ChunkingController(RobotController):
 
     def _need_inference(self):
         """Check if we need to run policy inference."""
-        return len(self.action_queue) <= self.config.policy_delay
+        need_inf = len(self.action_queue) <= self.config.policy_delay
+        if need_inf:
+            print(f"\n[Inference Needed] Current action queue size: {len(self.action_queue)}")
+        return need_inf
 
     def _run_inference(self):
         """Run policy inference and add actions to queue."""
@@ -657,32 +843,77 @@ class ChunkingController(RobotController):
         def inference_worker():
             try:
                 current_time = time.time()
-                
+
                 if self.last_inference_time is not None:
                     time_since_last = current_time - self.last_inference_time
                     print(f"\n{'='*50}")
                     print(f"[Inference #{self.inference_count}] Time since last: {time_since_last*1000:.1f} ms")
                     print(f"{'='*50}")
-                
+
+                # Record observation arrival
+                if self.config.visualize:
+                    self.live_events.append((time.time(), 'obs_arrival'))
+
                 # Get observation and predict
                 obs_dict = self._get_observation()
                 actions = self.policy_client.predict_action(obs_dict)
-                
+                inference_time = time.time()
+
+                # Record inference done
+                if self.config.visualize:
+                    self.live_events.append((inference_time, 'inference_done'))
                 # Store for debug plotting
                 if self.config.debug_plotting:
                     self.all_predicted_chunks.append((self.inference_count, actions.copy()))
                 
                 # Thread-safe queue update
                 with self.inference_lock:
-                    if len(self.action_queue) == 0:
+                    if self.first_inference_round:
                         for action in actions[:self.config.action_exec_size]:
                             self.action_queue.append(action.copy())
+                        self.first_inference_round = False
                     else:
                         start_idx = self.config.policy_delay
                         end_idx = start_idx + self.config.action_exec_size
                         for action in actions[start_idx:end_idx]:
                             self.action_queue.append(action.copy())
-                    
+
+                    # Debug data collection
+                    if self.debug_data_collection is not None:
+                        timestamp_ms = int(inference_time * 1000)
+
+                        # Save action chunk
+                        self.debug_data_collection['action_chunks'].append(
+                            (timestamp_ms, actions.copy())
+                        )
+
+                        # Save point cloud
+                        pcd = obs_dict.get('pcd', None)
+                        if pcd is not None:
+                            self.debug_data_collection['point_clouds'].append(
+                                (timestamp_ms, pcd.copy())
+                            )
+
+                        # Save robot0_eef_pos
+                        robot0_eef_pos = obs_dict.get('robot0_eef_pos', None)
+                        if robot0_eef_pos is not None:
+                            self.debug_data_collection['robot0_eef_pos'].append(
+                                (timestamp_ms, robot0_eef_pos.copy())
+                            )
+
+                        # Save RGBD timestamp
+                        pcd_timestamp = obs_dict.get('pcd_timestamp', None)
+                        if pcd_timestamp is not None:
+                            # Ensure we create an independent copy (not a reference)
+                            if isinstance(pcd_timestamp, np.ndarray):
+                                ts_copy = pcd_timestamp.copy()
+                            else:
+                                ts_copy = np.array(pcd_timestamp).copy()
+                            print(f"Saving RGBD timestamp: {ts_copy[0]}")
+                            self.debug_data_collection['pcd_timestamps'].append(
+                                (timestamp_ms, ts_copy[0])
+                            )
+                
                     self.last_inference_time = time.time()
                     print(f"Inference took {(self.last_inference_time - current_time)*1000:.1f} ms")
                     self.inference_count += 1
@@ -705,19 +936,85 @@ class ChunkingController(RobotController):
                 time_to_wait = self.execute_dt - time_since_last_exec
                 time.sleep(time_to_wait - timing_adjust_constant)
 
+    def _setup_live_plot(self):
+        """Initialize live matplotlib plot for event tracking."""
+        plt.ion()  # Enable interactive mode
+        self.live_plot_fig, self.live_plot_ax = plt.subplots(figsize=(12, 6))
+        self.live_plot_ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+        self.live_plot_ax.set_ylabel('Event Type', fontsize=12, fontweight='bold')
+        self.live_plot_ax.set_title('Live Policy Execution Events', fontsize=14, fontweight='bold')
+        self.live_plot_ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show(block=False)
+        print("Live visualization enabled")
+
+    def _update_live_plot(self, force=False):
+        """Update live plot with latest events (throttled to reduce overhead).
+
+        Args:
+            force: If True, update regardless of time interval
+        """
+        if self.live_plot_ax is None or len(self.live_events) == 0:
+            return
+
+        # Only update if enough time has passed or forced
+        current_time = time.time()
+        if not force and (current_time - self.last_plot_update_time) < self.plot_update_interval:
+            return
+
+        self.last_plot_update_time = current_time
+
+        # Clear and redraw
+        self.live_plot_ax.clear()
+
+        # Convert timing events to arrays
+        timestamps = np.array([t - self.start_time for t, _ in self.live_events])
+        event_types = [event_type for _, event_type in self.live_events]
+
+        # Map event types to numeric values
+        event_map = {'obs_arrival': 0, 'inference_done': 1, 'action_executed': 2}
+        colors = {'obs_arrival': 'blue', 'inference_done': 'red', 'action_executed': 'green'}
+
+        # Plot events
+        for event_type, y_val in event_map.items():
+            mask = [e == event_type for e in event_types]
+            event_times = timestamps[mask]
+            if len(event_times) > 0:
+                self.live_plot_ax.scatter(event_times, [y_val] * len(event_times),
+                                         c=colors[event_type], s=60, alpha=0.8, label=event_type)
+
+        # Configure axes
+        self.live_plot_ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+        self.live_plot_ax.set_ylabel('Event Type', fontsize=12, fontweight='bold')
+        self.live_plot_ax.set_yticks(list(event_map.values()))
+        self.live_plot_ax.set_yticklabels(list(event_map.keys()))
+        self.live_plot_ax.set_ylim(-0.5, 2.5)
+        self.live_plot_ax.set_title('Live Policy Execution Events', fontsize=14, fontweight='bold')
+        self.live_plot_ax.grid(True, alpha=0.3)
+        self.live_plot_ax.legend(loc='upper right', fontsize=10)
+
+        # Refresh display
+        self.live_plot_fig.canvas.draw()
+        self.live_plot_fig.canvas.flush_events()
+
     def run(self, n_steps: int):
         """Execute chunking control with async inference."""
         n_steps_done = 0
-        
+
         if self.config.debug_plotting:
             self.start_time = time.time()
-        
+
+        # Initialize start time for live visualization
+        if self.config.visualize:
+            self.start_time = time.time()
+
         # Initial inference (synchronous to populate queue)
         self._run_inference_async()
         while self.inference_in_progress:
-            time.sleep(0.005)  # Wait for first inference
-        
+            time.sleep(0.002)  # Wait for first inference
+
         print("\nStarting chunking control...")
+        self.first_inference_round = True
         while n_steps_done < n_steps:
             loop_start = time.time()
             
@@ -733,6 +1030,17 @@ class ChunkingController(RobotController):
                     action = self.action_queue.pop(0)
             
             if queue_has_actions:
+                # Enforce fixed control frequency
+                if self.enforce_fixed_freq:
+                    self._enforce_fixed_frequency()
+                self._execute_action(action)
+                self.last_execution_time = time.time() # Update execution time
+
+                # Record action execution
+                if self.config.visualize:
+                    self.live_events.append((time.time(), 'action_executed'))
+                    self._update_live_plot()
+
                 if self.config.debug_plotting:
                     current_pose = self.robot.end_effector_pose
                     rotmat = current_pose.orientation.as_matrix()
@@ -741,11 +1049,6 @@ class ChunkingController(RobotController):
                     self.actual_poses.append((elapsed, current_pose.position[0],
                                              current_pose.position[1],
                                              current_pose.position[2], yaw))
-                # Enforce fixed control frequency
-                if self.enforce_fixed_freq:
-                    self._enforce_fixed_frequency()
-                self._execute_action(action)
-                self.last_execution_time = time.time() # Update execution time
                 n_steps_done += 1
             else:
                 print("Warning: Action queue empty, waiting for inference...")
@@ -754,10 +1057,21 @@ class ChunkingController(RobotController):
             if self.config.debug_plotting:
                 loop_time = (time.time() - loop_start) * 1000
                 self.control_loop_times.append(loop_time)
-        
+
         # Wait for any ongoing inference to complete
         if self.inference_thread is not None:
             self.inference_thread.join(timeout=5.0)
+
+        # Final plot update and close
+        if self.live_plot_fig is not None:
+            self._update_live_plot(force=True)  # Final update with all events
+            plt.close(self.live_plot_fig)
+            self.live_plot_fig = None
+            self.live_plot_ax = None
+
+        # Save debug data at end
+        if self.debug_data_collection is not None and len(self.debug_data_collection['executed_actions']) > 0:
+            self._save_debug_data()
 
         # Generate debug plots
         if self.config.debug_plotting:
@@ -964,6 +1278,164 @@ class ChunkingController(RobotController):
         print(f"Action execution timing plot saved to: {filename}")
         plt.close()
 
+    def _save_debug_data(self):
+        """Save all collected debug data at end of execution."""
+        if self.debug_data_collection is None:
+            return
+
+        try:
+            # Create directory structure
+            debug_dir = Path('debug_data')
+            subdirs = {
+                'action_chunks': debug_dir / 'action_chunks',
+                'executed_actions': debug_dir / 'actions',
+                'eef_poses': debug_dir / 'eef_poses',
+                'point_clouds': debug_dir / 'pcd',
+                'robot0_eef_pos': debug_dir / 'robot0_eef_pos',
+                'actual_eef_pos': debug_dir / 'actual_eef_pos',
+                'pcd_timestamps': debug_dir / 'pcd_timestamps'
+            }
+
+            for subdir in subdirs.values():
+                subdir.mkdir(parents=True, exist_ok=True)
+
+            # Session timestamp for file naming
+            session_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+            # Save each data type
+            if len(self.debug_data_collection['action_chunks']) > 0:
+                self._save_timestamped_array_data(
+                    self.debug_data_collection['action_chunks'],
+                    subdirs['action_chunks'] / f'action_chunks_{session_ts}.npy'
+                )
+
+            if len(self.debug_data_collection['executed_actions']) > 0:
+                self._save_timestamped_array_data(
+                    self.debug_data_collection['executed_actions'],
+                    subdirs['executed_actions'] / f'executed_actions_{session_ts}.npy'
+                )
+
+            if len(self.debug_data_collection['eef_poses']) > 0:
+                self._save_eef_poses(
+                    self.debug_data_collection['eef_poses'],
+                    subdirs['eef_poses'] / f'eef_poses_{session_ts}.npy'
+                )
+
+            if len(self.debug_data_collection['point_clouds']) > 0:
+                self._save_point_clouds(
+                    self.debug_data_collection['point_clouds'],
+                    subdirs['point_clouds'],
+                    session_ts
+                )
+
+            if len(self.debug_data_collection['robot0_eef_pos']) > 0:
+                self._save_timestamped_array_data(
+                    self.debug_data_collection['robot0_eef_pos'],
+                    subdirs['robot0_eef_pos'] / f'robot0_eef_pos_{session_ts}.npy'
+                )
+
+            if len(self.debug_data_collection['actual_eef_pos']) > 0:
+                self._save_timestamped_array_data(
+                    self.debug_data_collection['actual_eef_pos'],
+                    subdirs['actual_eef_pos'] / f'actual_eef_pos_{session_ts}.npy'
+                )
+
+            if len(self.debug_data_collection['pcd_timestamps']) > 0:
+                self._save_timestamped_array_data(
+                    self.debug_data_collection['pcd_timestamps'],
+                    subdirs['pcd_timestamps'] / f'pcd_timestamps_{session_ts}.npy'
+                )
+
+            # Summary
+            print(f"\n{'='*60}")
+            print(f"Debug data saved: {debug_dir.absolute()}")
+            print(f"  Session: {session_ts}")
+            print(f"  Action chunks: {len(self.debug_data_collection['action_chunks'])} samples")
+            print(f"  Executed actions: {len(self.debug_data_collection['executed_actions'])} samples")
+            print(f"  EEF poses: {len(self.debug_data_collection['eef_poses'])} samples")
+            print(f"  Point clouds: {len(self.debug_data_collection['point_clouds'])} samples")
+            print(f"  Robot0 EEF pos: {len(self.debug_data_collection['robot0_eef_pos'])} samples")
+            print(f"  Actual EEF pos: {len(self.debug_data_collection['actual_eef_pos'])} samples")
+            print(f"  RGBD timestamps: {len(self.debug_data_collection['pcd_timestamps'])} samples")
+            print(f"{'='*60}\n")
+
+        except Exception as e:
+            print(f"WARNING: Failed to save debug data: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _save_timestamped_array_data(self, data_list, output_path):
+        """Save list of (timestamp_ms, array) tuples."""
+        if len(data_list) == 0:
+            return
+
+        timestamps = np.array([ts for ts, _ in data_list], dtype=np.int64)
+        arrays = np.array([arr for _, arr in data_list])
+
+        np.save(output_path, {
+            'timestamps_ms': timestamps,
+            'data': arrays
+        })
+
+    def _save_eef_poses(self, poses_list, output_path):
+        """Save end-effector poses with timestamps."""
+        if len(poses_list) == 0:
+            return
+
+        timestamps = np.array([ts for ts, _ in poses_list], dtype=np.int64)
+        positions = np.array([pose['position'] for _, pose in poses_list], dtype=np.float32)
+        quats = np.array([pose['orientation_quat'] for _, pose in poses_list], dtype=np.float32)
+        matrices = np.array([pose['orientation_matrix'] for _, pose in poses_list], dtype=np.float32)
+
+        np.save(output_path, {
+            'timestamps_ms': timestamps,
+            'positions': positions,
+            'orientations_quat': quats,
+            'orientations_matrix': matrices
+        })
+
+    def _save_point_clouds(self, pcd_list, output_dir, session_timestamp):
+        """Save point clouds with timestamps.
+
+        Saves all PCDs in single .npy file for easy batch loading.
+        """
+        if self.config.save_pcd_format == 'npy':
+            # Single file with all point clouds
+            timestamps = np.array([ts for ts, _ in pcd_list], dtype=np.int64)
+            point_clouds = [pcd for _, pcd in pcd_list]
+            point_counts = np.array([len(pcd) for pcd in point_clouds], dtype=np.int32)
+
+            output_path = output_dir / f'point_clouds_{session_timestamp}.npy'
+            np.save(output_path, {
+                'timestamps_ms': timestamps,
+                'point_clouds': point_clouds,
+                'point_counts': point_counts
+            }, allow_pickle=True)
+
+        elif self.config.save_pcd_format == 'ply':
+            # Individual PLY files
+            import open3d as o3d
+
+            timestamps = []
+            filenames = []
+
+            for timestamp_ms, pcd_array in pcd_list:
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(pcd_array[:, :3])
+                pcd.colors = o3d.utility.Vector3dVector(pcd_array[:, 3:6])
+
+                filename = f'pcd_{session_timestamp}_{timestamp_ms}.ply'
+                o3d.io.write_point_cloud(str(output_dir / filename), pcd)
+
+                timestamps.append(timestamp_ms)
+                filenames.append(filename)
+
+            # Save metadata
+            np.save(output_dir / f'metadata_{session_timestamp}.npy', {
+                'timestamps_ms': np.array(timestamps, dtype=np.int64),
+                'filenames': filenames
+            })
+
 
 class BlendingChunkingController(ChunkingController):
     """Controller with action blending in overlap regions."""
@@ -989,9 +1461,18 @@ class BlendingChunkingController(ChunkingController):
                     print(f"[Inference #{self.inference_count}] Time since last: {time_since_last*1000:.1f} ms")
                     print(f"{'='*50}")
 
+                # Record observation arrival
+                if self.config.visualize:
+                    self.live_events.append((time.time(), 'obs_arrival'))
+
                 # Get observation and predict
                 obs_dict = self._get_observation()
                 actions = self.policy_client.predict_action(obs_dict)
+                inference_time = time.time()
+
+                # Record inference done
+                if self.config.visualize:
+                    self.live_events.append((inference_time, 'inference_done'))
 
                 # Store for debug plotting
                 if self.config.debug_plotting:
@@ -999,10 +1480,11 @@ class BlendingChunkingController(ChunkingController):
 
                 # Thread-safe queue update with blending
                 with self.inference_lock:
-                    if len(self.action_queue) == 0:
+                    if self.first_inference_round:
                         # First time: add first action_exec_size actions
                         for action in actions[:self.config.action_exec_size]:
                             self.action_queue.append(action.copy())
+                        self.first_inference_round = False
                     else:
                         # Merge overlapping actions
                         start_idx = self.config.policy_delay
@@ -1028,6 +1510,42 @@ class BlendingChunkingController(ChunkingController):
                             (self.inference_count, [a.copy() for a in self.action_queue])
                         )
 
+                    # Debug data collection
+                    if self.debug_data_collection is not None:
+                        timestamp_ms = int(inference_time * 1000)
+
+                        # Save action chunk
+                        self.debug_data_collection['action_chunks'].append(
+                            (timestamp_ms, actions.copy())
+                        )
+
+                        # Save point cloud
+                        pcd = obs_dict.get('pcd', None)
+                        if pcd is not None:
+                            self.debug_data_collection['point_clouds'].append(
+                                (timestamp_ms, pcd.copy())
+                            )
+
+                        # Save robot0_eef_pos
+                        robot0_eef_pos = obs_dict.get('robot0_eef_pos', None)
+                        if robot0_eef_pos is not None:
+                            self.debug_data_collection['robot0_eef_pos'].append(
+                                (timestamp_ms, robot0_eef_pos.copy())
+                            )
+
+                        # Save RGBD timestamp
+                        pcd_timestamp = obs_dict.get('pcd_timestamp', None)
+                        if pcd_timestamp is not None:
+                            # Ensure we create an independent copy (not a reference)
+                            if isinstance(pcd_timestamp, np.ndarray):
+                                ts_copy = pcd_timestamp.copy()
+                            else:
+                                ts_copy = np.array(pcd_timestamp).copy()
+                            print(f"Saving RGBD timestamp: {ts_copy}")
+                            self.debug_data_collection['pcd_timestamps'].append(
+                                (timestamp_ms, ts_copy)
+                            )
+
                     self.last_inference_time = time.time()
                     print(f"Inference took {(self.last_inference_time - current_time)*1000:.1f} ms")
                     self.inference_count += 1
@@ -1047,11 +1565,16 @@ class BlendingChunkingController(ChunkingController):
         if self.config.debug_plotting:
             self.start_time = time.time()
 
+        # Initialize start time for live visualization
+        if self.config.visualize:
+            self.start_time = time.time()
+
         # Initial inference (synchronous to populate queue)
         self._run_inference_async()
         while self.inference_in_progress:
             time.sleep(0.005)  # Wait for first inference
 
+        self.first_inference_round = True
         print("\nStarting blending chunking control...")
         while n_steps_done < n_steps:
             loop_start = time.time()
@@ -1081,6 +1604,12 @@ class BlendingChunkingController(ChunkingController):
                     self._enforce_fixed_frequency()
                 self._execute_action(action)
                 self.last_execution_time = time.time() # Update execution time
+
+                # Record action execution
+                if self.config.visualize:
+                    self.live_events.append((time.time(), 'action_executed'))
+                    self._update_live_plot()
+
                 n_steps_done += 1
             else:
                 print("Warning: Action queue empty, waiting for inference...")
@@ -1093,6 +1622,17 @@ class BlendingChunkingController(ChunkingController):
         # Wait for any ongoing inference to complete
         if self.inference_thread is not None:
             self.inference_thread.join(timeout=5.0)
+
+        # Final plot update and close
+        if self.live_plot_fig is not None:
+            self._update_live_plot(force=True)  # Final update with all events
+            plt.close(self.live_plot_fig)
+            self.live_plot_fig = None
+            self.live_plot_ax = None
+
+        # Save debug data at end
+        if self.debug_data_collection is not None and len(self.debug_data_collection['executed_actions']) > 0:
+            self._save_debug_data()
 
         # Generate debug plots
         if self.config.debug_plotting:

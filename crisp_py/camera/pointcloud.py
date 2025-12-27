@@ -52,6 +52,7 @@ class PointCloudManager(Node):
         # Subscribe to RGB and depth topics
         self.rgb_subs = []
         self.depth_subs = []
+        
         for i in [1, 2, 3]:
             rgb_sub = Subscriber(self, Image, f"/cam{i}/color/image_raw", qos_profile=qos)
             depth_sub = Subscriber(self, Image, f"/cam{i}/aligned_depth_to_color/image_raw", qos_profile=qos)
@@ -146,7 +147,7 @@ class PointCloudManager(Node):
         self.rgb_images = []
         self.depth_images = []
         while self.rgb_images == [] or self.depth_images == []:
-            time.sleep(0.01)  # Wait for first callback
+            time.sleep(0.002)  # Wait for first callback
             # print("No point celoud received yet.")
 
         # Process each camera
@@ -174,7 +175,6 @@ class PointCloudManager(Node):
         merged_colors = np.vstack(all_colors)
 
         latest_pcd = np.concatenate([merged_points, merged_colors], axis=1)
-
         return latest_pcd
 
     def get_latest_rgbd(self, cam_name: str):

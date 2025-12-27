@@ -8,10 +8,9 @@ import argparse
 from pathlib import Path
 import cv2
 import numpy as np
-import open3d as o3d
 
 
-def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, load_eef_pose=False, load_intervention=False):
+def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, load_eef_pose=False, load_intervention=False, min_traj_length=0):
     """
     Load all RGB images from all episodes.
 
@@ -21,6 +20,7 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
         use_segmented: If True, load segmented_rgb instead of rgb
         load_eef_pose: If True, also load eef_pose trajectory data
         load_intervention: If True, also load intervention flags
+        min_traj_length: Minimum trajectory length to include episode (default: 0, no filtering)
 
     Returns:
         episodes_data: list of dicts with {
@@ -170,92 +170,16 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
 
         print(f"{min_frames} frames")
 
+    # Filter episodes by minimum trajectory length if specified
+    if min_traj_length > 0:
+        original_count = len(episodes_data)
+        episodes_data = [ep for ep in episodes_data if ep['num_frames'] > min_traj_length]
+        filtered_count = original_count - len(episodes_data)
+        if filtered_count > 0:
+            print(f"\nFiltered out {filtered_count} episodes with trajectory length <= {min_traj_length}")
+            print(f"Remaining episodes: {len(episodes_data)}")
+
     return episodes_data
-
-
-def create_trajectory_visualization(eef_pose, episode_name):
-    """
-    Create a 3D visualization of end-effector trajectory using Open3D.
-
-    Args:
-        eef_pose: numpy array of shape (N, 7) containing [x, y, z, qx, qy, qz, qw]
-                  or (N, 3) containing just [x, y, z]
-        episode_name: name of the episode for window title
-
-    Returns:
-        o3d.visualization.Visualizer: the visualizer object
-    """
-    if eef_pose is None or len(eef_pose) == 0:
-        print("Warning: No eef_pose data to visualize")
-        return None
-
-    # Extract positions (first 3 columns)
-    positions = eef_pose[:, :3] if eef_pose.shape[1] >= 3 else eef_pose
-
-    # Create Open3D visualizer
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name=f"Trajectory: {episode_name}", width=800, height=600)
-
-    # Create trajectory line set
-    points = positions
-    lines = [[i, i + 1] for i in range(len(points) - 1)]
-
-    # Create colors gradient from green (start) to red (end)
-    colors = []
-    for i in range(len(lines)):
-        t = i / max(1, len(lines) - 1)
-        # Green -> Yellow -> Red
-        r = t
-        g = 1.0 - t * 0.5
-        b = 0.0
-        colors.append([r, g, b])
-
-    # Create LineSet
-    line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(points)
-    line_set.lines = o3d.utility.Vector2iVector(lines)
-    line_set.colors = o3d.utility.Vector3dVector(colors)
-
-    # Add trajectory to visualizer
-    vis.add_geometry(line_set)
-
-    # Create point cloud for waypoints
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    # Color waypoints similarly
-    point_colors = np.zeros((len(points), 3))
-    for i in range(len(points)):
-        t = i / max(1, len(points) - 1)
-        point_colors[i] = [t, 1.0 - t * 0.5, 0.0]
-    pcd.colors = o3d.utility.Vector3dVector(point_colors)
-    vis.add_geometry(pcd)
-
-    # Add start point marker (larger, green sphere)
-    start_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.015)
-    start_sphere.translate(points[0])
-    start_sphere.paint_uniform_color([0, 1, 0])  # Green
-    vis.add_geometry(start_sphere)
-
-    # Add end point marker (larger, red sphere)
-    end_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.015)
-    end_sphere.translate(points[-1])
-    end_sphere.paint_uniform_color([1, 0, 0])  # Red
-    vis.add_geometry(end_sphere)
-
-    # Add coordinate frame at origin
-    coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
-    vis.add_geometry(coord_frame)
-
-    # Set view options
-    render_option = vis.get_render_option()
-    render_option.point_size = 5.0
-    render_option.line_width = 3.0
-
-    # Update geometry and view
-    vis.poll_events()
-    vis.update_renderer()
-
-    return vis
 
 
 def create_gripper_bar(width, gripper_value, bar_height=40):
@@ -343,6 +267,7 @@ def create_intervention_bar(width, intervention_value, bar_height=40):
 def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, show_intervention=False):
     """
     Create visualization for a single frame from one episode.
+    Layout: Cam 1-3 horizontally, Cam 4 (in-hand) on the right side.
 
     Args:
         episode_data: episode data dict
@@ -357,7 +282,8 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
         return None
 
     frame_data = episode_data['frames'][frame_idx]
-    images = []
+    static_cameras = []  # Cameras 1-3
+    inhand_camera = None  # Camera 4
 
     for cam_idx in sorted(frame_data.keys()):
         img = cv2.imread(str(frame_data[cam_idx]))
@@ -377,16 +303,44 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
 
         # Add camera label
         label = f"Cam {cam_idx}"
+        if cam_idx == 4:
+            label += " (In-hand)"
         cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                    1, (0, 255, 0), 2)
 
-        images.append(img)
+        # Separate cam4 from others
+        if cam_idx == 4:
+            inhand_camera = img
+        else:
+            static_cameras.append(img)
 
-    if not images:
+    if not static_cameras and inhand_camera is None:
         return None
 
-    # Concatenate cameras horizontally
-    concat_img = np.concatenate(images, axis=1)
+    # Concatenate cameras 1-3 horizontally
+    if static_cameras:
+        left_panel = np.concatenate(static_cameras, axis=1)
+    else:
+        left_panel = np.zeros((max_height, 640, 3), dtype=np.uint8)
+
+    # Handle cam4 on the right
+    if inhand_camera is not None:
+        # Make cam4 fill the height of the left panel
+        if inhand_camera.shape[0] < left_panel.shape[0]:
+            # Add padding below cam4 to match height
+            padding_height = left_panel.shape[0] - inhand_camera.shape[0]
+            padding = np.zeros((padding_height, inhand_camera.shape[1], 3), dtype=np.uint8)
+            inhand_camera = np.vstack([inhand_camera, padding])
+        elif inhand_camera.shape[0] > left_panel.shape[0]:
+            # Resize to match height
+            scale = left_panel.shape[0] / inhand_camera.shape[0]
+            new_width = int(inhand_camera.shape[1] * scale)
+            inhand_camera = cv2.resize(inhand_camera, (new_width, left_panel.shape[0]))
+
+        # Concatenate left panel and cam4 horizontally
+        concat_img = np.concatenate([left_panel, inhand_camera], axis=1)
+    else:
+        concat_img = left_panel
 
     # Add header with episode name
     header_height = 80
@@ -420,16 +374,17 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
     return final_img
 
 
-def visualize_all_episodes(episodes_path, num_cams=3, use_segmented=False, teleop_mode=False, intervention_mode=False):
+def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleop_mode=False, intervention_mode=False, min_traj_length=0):
     """
     Interactive visualization of episodes' RGB images.
 
     Args:
         episodes_path: Path to episodes directory
-        num_cams: Number of cameras
+        num_cams: Number of cameras (default: 4)
         use_segmented: If True, visualize segmented_rgb instead of rgb
-        teleop_mode: If True, also show 3D trajectory visualization
-        intervention_mode: If True, show intervention indicators and trajectory
+        teleop_mode: If True, load EEF pose data (no visualization)
+        intervention_mode: If True, show intervention indicators
+        min_traj_length: Minimum trajectory length to include episode (default: 0, no filtering)
 
     Controls:
         - Up/Down arrow: Navigate between episodes
@@ -445,7 +400,8 @@ def visualize_all_episodes(episodes_path, num_cams=3, use_segmented=False, teleo
     load_intv = intervention_mode
 
     episodes_data = load_all_episodes_images(episodes_path, num_cams, use_segmented,
-                                             load_eef_pose=load_eef, load_intervention=load_intv)
+                                             load_eef_pose=load_eef, load_intervention=load_intv,
+                                             min_traj_length=min_traj_length)
 
     if not episodes_data:
         print("No episodes found or loaded!")
@@ -455,17 +411,12 @@ def visualize_all_episodes(episodes_path, num_cams=3, use_segmented=False, teleo
 
     window_name = "Episode Viewer"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    # Set window to 3x bigger size
+    cv2.resizeWindow(window_name, 3840, 2160)
 
     current_episode_idx = 0
     current_frame = 0
     auto_play = False
-
-    # Initialize Open3D visualizer for teleop/intervention mode
-    trajectory_vis = None
-    if teleop_mode or intervention_mode:
-        episode = episodes_data[current_episode_idx]
-        if episode.get('eef_pose') is not None:
-            trajectory_vis = create_trajectory_visualization(episode['eef_pose'], episode['name'])
 
     while True:
         episode = episodes_data[current_episode_idx]
@@ -520,39 +471,17 @@ def visualize_all_episodes(episodes_path, num_cams=3, use_segmented=False, teleo
             auto_play = False
         elif key == 82 or key == 0:  # Up arrow
             # Previous episode
-            prev_idx = current_episode_idx
             current_episode_idx = max(0, current_episode_idx - 1)
             current_frame = 0  # Reset to first frame of new episode
             auto_play = False
             print(f"Switched to episode {current_episode_idx + 1}: {episodes_data[current_episode_idx]['name']}")
 
-            # Update trajectory visualization if in teleop/intervention mode and episode changed
-            if (teleop_mode or intervention_mode) and prev_idx != current_episode_idx:
-                if trajectory_vis is not None:
-                    trajectory_vis.close()
-                new_episode = episodes_data[current_episode_idx]
-                if new_episode.get('eef_pose') is not None:
-                    trajectory_vis = create_trajectory_visualization(new_episode['eef_pose'], new_episode['name'])
-                else:
-                    trajectory_vis = None
-
         elif key == 84 or key == 1:  # Down arrow
             # Next episode
-            prev_idx = current_episode_idx
             current_episode_idx = min(len(episodes_data) - 1, current_episode_idx + 1)
             current_frame = 0  # Reset to first frame of new episode
             auto_play = False
             print(f"Switched to episode {current_episode_idx + 1}: {episodes_data[current_episode_idx]['name']}")
-
-            # Update trajectory visualization if in teleop/intervention mode and episode changed
-            if (teleop_mode or intervention_mode) and prev_idx != current_episode_idx:
-                if trajectory_vis is not None:
-                    trajectory_vis.close()
-                new_episode = episodes_data[current_episode_idx]
-                if new_episode.get('eef_pose') is not None:
-                    trajectory_vis = create_trajectory_visualization(new_episode['eef_pose'], new_episode['name'])
-                else:
-                    trajectory_vis = None
         elif key == ord(' '):  # Space
             auto_play = not auto_play
             print(f"Auto-play: {'ON' if auto_play else 'OFF'}")
@@ -561,45 +490,22 @@ def visualize_all_episodes(episodes_path, num_cams=3, use_segmented=False, teleo
             auto_play = False
             print("Reset to first frame")
         elif key == ord('n'):  # Next episode
-            prev_idx = current_episode_idx
             current_episode_idx = min(len(episodes_data) - 1, current_episode_idx + 1)
             current_frame = 0
             auto_play = False
             print(f"Switched to episode {current_episode_idx + 1}: {episodes_data[current_episode_idx]['name']}")
 
-            # Update trajectory visualization if in teleop/intervention mode and episode changed
-            if (teleop_mode or intervention_mode) and prev_idx != current_episode_idx:
-                if trajectory_vis is not None:
-                    trajectory_vis.close()
-                new_episode = episodes_data[current_episode_idx]
-                if new_episode.get('eef_pose') is not None:
-                    trajectory_vis = create_trajectory_visualization(new_episode['eef_pose'], new_episode['name'])
-                else:
-                    trajectory_vis = None
-
         elif key == ord('p'):  # Previous episode
-            prev_idx = current_episode_idx
             current_episode_idx = max(0, current_episode_idx - 1)
             current_frame = 0
             auto_play = False
             print(f"Switched to episode {current_episode_idx + 1}: {episodes_data[current_episode_idx]['name']}")
-
-            # Update trajectory visualization if in teleop/intervention mode and episode changed
-            if (teleop_mode or intervention_mode) and prev_idx != current_episode_idx:
-                if trajectory_vis is not None:
-                    trajectory_vis.close()
-                new_episode = episodes_data[current_episode_idx]
-                if new_episode.get('eef_pose') is not None:
-                    trajectory_vis = create_trajectory_visualization(new_episode['eef_pose'], new_episode['name'])
-                else:
-                    trajectory_vis = None
 
         # Auto-play: advance frame
         if auto_play:
             current_frame += 1
             if current_frame >= num_frames:
                 # Move to next episode when frames end
-                prev_idx = current_episode_idx
                 current_episode_idx = min(len(episodes_data) - 1, current_episode_idx + 1)
                 current_frame = 0
                 if current_episode_idx == len(episodes_data) - 1:
@@ -607,25 +513,8 @@ def visualize_all_episodes(episodes_path, num_cams=3, use_segmented=False, teleo
                     current_episode_idx = 0
                 print(f"Auto-play: Switched to episode {current_episode_idx + 1}")
 
-                # Update trajectory visualization if in teleop/intervention mode and episode changed
-                if (teleop_mode or intervention_mode) and prev_idx != current_episode_idx:
-                    if trajectory_vis is not None:
-                        trajectory_vis.close()
-                    new_episode = episodes_data[current_episode_idx]
-                    if new_episode.get('eef_pose') is not None:
-                        trajectory_vis = create_trajectory_visualization(new_episode['eef_pose'], new_episode['name'])
-                    else:
-                        trajectory_vis = None
-
-        # Update Open3D visualizer if it exists
-        if trajectory_vis is not None:
-            trajectory_vis.poll_events()
-            trajectory_vis.update_renderer()
-
     # Cleanup
     cv2.destroyAllWindows()
-    if trajectory_vis is not None:
-        trajectory_vis.close()
 
 
 def main():
@@ -634,18 +523,28 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Visualize raw RGB images
+  # 
+  python record/inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes --min-traj-length 150 --intv
+
+  # Visualize raw RGB images (4 cameras: 3 static + 1 in-hand)
   python record/inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes
 
   # Visualize segmented RGB images
   python inspect_raw_data.py /home/mingxi/mingxi_ws/handpi/data/lift_block_realworld/output --segment
 
-  # Visualize with 3D trajectory (teleop mode)
-  python inspect_raw_data.py /home/mingxi/code/h2r_franka_ROS2/raw_datasets/episodes --teleop
-  python inspect_raw_data.py /home/mingxi/temp_data/wrist_data --teleop
+  # Visualize with intervention indicators
+  python record/inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes --intv
 
-  # Visualize with intervention indicators (intervention mode)
-  python inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes --intv
+  # Visualize only episodes with trajectory length > 150 frames
+  python record/inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes --min-traj-length 150
+
+  # Visualize with 3 cameras only (no in-hand cam)
+  python record/inspect_raw_data.py /path/to/episodes --num-cams 3
+
+Layout:
+  - Cameras 1-3 displayed horizontally on the left
+  - Camera 4 (in-hand) displayed on the right side
+  - Window initialized at 3840x2160 (3x standard size)
 
 Controls:
   Up/Down arrows: Navigate between episodes
@@ -666,8 +565,8 @@ Controls:
     parser.add_argument(
         "--num-cams",
         type=int,
-        default=3,
-        help="Number of cameras (default: 3)"
+        default=4,
+        help="Number of cameras (default: 4, including in-hand cam)"
     )
 
     parser.add_argument(
@@ -679,13 +578,20 @@ Controls:
     parser.add_argument(
         "--teleop",
         action="store_true",
-        help="Enable teleop mode: show 3D trajectory visualization alongside RGB images"
+        help="Enable teleop mode: load EEF pose data"
     )
 
     parser.add_argument(
         "--intv",
         action="store_true",
-        help="Enable intervention mode: show 3D trajectory, RGB images, and intervention indicators"
+        help="Enable intervention mode: show RGB images and intervention indicators"
+    )
+
+    parser.add_argument(
+        "--min-traj-length",
+        type=int,
+        default=0,
+        help="Minimum trajectory length to include episode (default: 0, no filtering). Use 150 to filter short episodes."
     )
 
     args = parser.parse_args()
@@ -696,7 +602,7 @@ Controls:
         print(f"Error: Path does not exist: {path}")
         return
 
-    visualize_all_episodes(path, args.num_cams, args.segment, args.teleop, args.intv)
+    visualize_all_episodes(path, args.num_cams, args.segment, args.teleop, args.intv, args.min_traj_length)
 
 
 if __name__ == "__main__":

@@ -28,10 +28,10 @@ from pynput import keyboard
 class RecorderConfig:
     """Configuration for the frame recorder."""
     num_cameras: int = 4
-    fps: int = 5
+    fps: int = 15
     output_dir: str = './raw_datasets/episodes'
-    queue_size: int = 100
-    sync_slop: float = 0.2  # 200ms max time difference for sync (increased for 4 cameras)
+    queue_size: int = 20
+    sync_slop: float = 0.05  # 50ms max time difference for sync (increased for 4 cameras)
     rgb_encoding: str = 'bgr8'
     depth_encoding: str = 'passthrough'
     save_format_rgb: str = 'png'
@@ -51,6 +51,7 @@ class RecordingState:
     eef_poses: list = field(default_factory=list)
     joint_states: list = field(default_factory=list)
     intervention_states: list = field(default_factory=list)
+    last_frame_time: Optional[float] = None  # Timestamp of last recorded frame
 
 
 class FrameRecorderNode(Node):
@@ -205,6 +206,9 @@ class FrameRecorderNode(Node):
             with self.data_lock:
                 self.current_intervention_state = intervention_state
                 self.has_teleop_command = True
+        else:
+            with self.data_lock:
+                self.has_teleop_command = False
 
         print("self.current_intervention_state: ", self.current_intervention_state)
 
@@ -224,7 +228,6 @@ class FrameRecorderNode(Node):
         # Get current state snapshot
         with self.data_lock:
             has_teleop = self.has_teleop_command
-            self.has_teleop_command = False  # Reset teleop flag
             gripper = self.current_gripper_state
             eef_pose = self.current_eef_pose.copy() if self.current_eef_pose is not None else None
             joint_state = self.current_joint_state.copy() if self.current_joint_state is not None else None
@@ -234,7 +237,21 @@ class FrameRecorderNode(Node):
 
         # Only record frames when teleop command is received
         if not has_teleop:
+            print('idle, not started or inferencing')
             return
+
+        # FPS enforcement: Check if enough time has elapsed since last frame
+        current_time = msgs[0].header.stamp.sec + msgs[0].header.stamp.nanosec * 1e-9
+        min_interval = 1.0 / self.config.fps  # e.g., 0.2 seconds for 5 FPS
+
+        if self.state.last_frame_time is not None:
+            time_since_last = current_time - self.state.last_frame_time
+            if time_since_last < min_interval:
+                # Too soon, skip this frame
+                return
+
+        # Update last frame time
+        self.state.last_frame_time = current_time
 
         self.get_logger().info("Synchronized bundle received with teleop command, recording frame.")
 
@@ -283,6 +300,7 @@ class FrameRecorderNode(Node):
             self.state.eef_poses = []
             self.state.joint_states = []
             self.state.intervention_states = []
+            self.state.last_frame_time = None  # Reset FPS timer
             self._clear_queue()
 
             with self.data_lock:
@@ -521,6 +539,20 @@ class FrameRecorderNode(Node):
         try:
             if hasattr(key, 'char') and key.char == 'r':
                 self._reset_episode()
+            elif hasattr(key, 'char') and key.char == 'f':
+                self.get_logger().info("Bad Quality Data Marked, reset episode.")
+
+                # Create bad.txt file in state directory
+                if self.state.current_episode_path:
+                    state_dir = os.path.join(self.state.current_episode_path, 'state')
+                    os.makedirs(state_dir, exist_ok=True)
+                    bad_file_path = os.path.join(state_dir, 'bad.txt')
+                    with open(bad_file_path, 'w') as f:
+                        f.write('Bad quality data marked by user\n')
+                    self.get_logger().info(f"Created bad.txt marker at {bad_file_path}")
+
+                self._reset_episode()
+
         except AttributeError:
             pass
 

@@ -4,6 +4,8 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from crisp_py.robot import Pose
+from PIL import Image
+
 from .diffusion_constants import FINGER_HAND_OFFSET
 
 
@@ -50,6 +52,15 @@ def franka_obs_to_diff_obs(obs_manager, eef_pose, gripper_state, joint_state, vi
 
     inhand_cam = 'cam4'
     ih_rgb, ih_depth = obs_manager.get_latest_rgbd(inhand_cam)
+    h, w = ih_rgb.shape[:2]
+    target_size = 84
+    min_dim = min(h, w)
+    top = (h - min_dim) // 2
+    left = (w - min_dim) // 2
+    ih_rgb_cropped = ih_rgb[top:top+min_dim, left:left+min_dim, :]
+    resized = np.array(Image.fromarray(ih_rgb_cropped).resize((target_size, target_size), Image.BILINEAR))
+    ih_rgb_resized = np.transpose(resized, (2, 0, 1)) / 255.0
+
     # print(ih_depth)
     # rgb_dict, depth_dict = {inhand_cam: ih_rgb}, {inhand_cam: ih_depth}
     # rgb_dict, depth_dict, is_contact = pcd_client.process_images(rgb_dict, depth_dict)
@@ -61,9 +72,6 @@ def franka_obs_to_diff_obs(obs_manager, eef_pose, gripper_state, joint_state, vi
 
     # Visualize for debugging
     if visualize:
-        import matplotlib.pyplot as plt
-        plt.imshow(rgb_dict[inhand_cam].astype(np.uint8))
-        plt.show()
         import open3d as o3d
         pcd_visualize = o3d.geometry.PointCloud()
         pcd_visualize.points = o3d.utility.Vector3dVector(pcd[:, :3])
@@ -74,7 +82,7 @@ def franka_obs_to_diff_obs(obs_manager, eef_pose, gripper_state, joint_state, vi
     obs = {
         'pcd': pcd,
         # 'render_pcd': render_pcd,
-        'robot0_eye_in_hand_image': np.transpose(ih_rgb, (2, 0, 1)) / 255.0,
+        'robot0_eye_in_hand_image': ih_rgb_resized,
         'robot0_eye_in_hand_depth': ih_depth[None,...],
         'robot0_eef_pos': robot0_eef_pos.astype(np.float32),
         'robot0_eef_quat': robot0_eef_quat.astype(np.float32),
