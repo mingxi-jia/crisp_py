@@ -38,7 +38,7 @@ class JointStateSubscriber:
     @property
     def joint_values(self) -> np.ndarray:
         """Get joint values, skipping world joint (first element) for Franka."""
-        return self.joint_array if self.joint_array is not None else None
+        return self.joint_array
 
     @property
     def is_ready(self) -> bool:

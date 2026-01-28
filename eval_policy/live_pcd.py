@@ -20,22 +20,25 @@ sys.path.append(toolbox_path)
 from robot_filter.arm_segmentor import RobotArmSegmentation
 from hand_tool.trajectory_loader import ObservationProcessor
 # %%
+
+NO_ROBOT = False
 def main():
     """Test the PointCloudManager."""
     rclpy.init()
 
 
     # Get config path
-    config_path = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/configs/camera_info.yaml"
+    config_path = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/robot_configs/camera_info.yaml"
     print(f"debug: config_path = {config_path}")
     
     # Create point cloud manager
     manager = PointCloudManager(str(config_path))
-    joint_state_subscriber = JointStateSubscriber(manager, topic="/joint_states")
+    if not NO_ROBOT:
+        joint_state_subscriber = JointStateSubscriber(manager, topic="/joint_states")
 
-    # Initialize robot filter
-    robot_seg = RobotArmSegmentation()
-    robot_seg.load_urdf(os.path.join(toolbox_path, "robot_filter/panda_description/urdf/panda_arm_hand.urdf"))
+        # Initialize robot filter
+        robot_seg = RobotArmSegmentation()
+        robot_seg.load_urdf(os.path.join(toolbox_path, "robot_filter/panda_description/urdf/panda_arm_hand.urdf"))
 
     obs_processor = ObservationProcessor()
 
@@ -94,13 +97,13 @@ def main():
                 pcd = obs_processor.filter_pcd_by_workspace(pcd)
 
                 obs_processor.robot_filter._init_pre_samples()
-                if collect_hand_data:
+                if collect_hand_data or NO_ROBOT:
                     robo_pcd = obs_processor.get_render_pcd(pcd, np.array([0.6, 0.0, 0.25, 0, np.pi/12, 0, 0]), 1, render_type='gripper')
-                    robo_colors = robo_pcd[:, :3]
-                    print(robo_pcd.shape)
+                    robo_colors = robo_pcd[:, 3:]
                     pcd_o3d.points = o3d.utility.Vector3dVector(robo_pcd[:, :3])
                     pcd_o3d.colors = o3d.utility.Vector3dVector(robo_colors)
                 else:
+                    print(f"joint_state_subscriber.joint_values {joint_state_subscriber.joint_values}")
                     robo_pcd = obs_processor.robot_filter.get_robot_pcd(np.concatenate([joint_state_subscriber.joint_values[:1], joint_state_subscriber.joint_values[2:]]))
                     robo_colors = np.ones((robo_pcd.shape[0], 3)) * [1.0, 0.5, 0.0]  # Orange
                     pcd_o3d.points = o3d.utility.Vector3dVector(np.concatenate([pcd[:, :3], robo_pcd], axis=0))

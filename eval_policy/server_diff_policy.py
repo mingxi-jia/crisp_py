@@ -34,7 +34,7 @@ def initialize_policy(ckpt_path: str):
     cfg = payload['cfg']
     cfg.logging.resume = False
     cfg.logging.mode = 'offline'
-    cfg.real_robot_eval = True
+    # cfg.real_robot_eval = True
 
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg)
@@ -73,6 +73,48 @@ def initialize_classifier(ckpt_path: str):
     classifier.eval()
 
     print(f"Classifier loaded from {ckpt_path}")
+
+@app.route('/predict_intv', methods=['POST'])
+def predict_intv():
+    global classifier, device
+
+    if classifier is None:
+        return jsonify({'error': 'Classifier not initialized'}), 500
+
+    try:
+        # Receive observation dictionary
+        data = request.get_json()
+
+        # Decode numpy arrays from base64
+        obs_dict = {}
+        for key, value in data.items():
+            array_bytes = base64.b64decode(value['data'])
+            array = np.frombuffer(array_bytes, dtype=value['dtype']).reshape(value['shape'])
+            obs_dict[key] = array
+
+        # Run classifier inference
+        t0 = time.time()
+        # Get in-hand image - it's in (C, H, W) format with values in [0, 1]
+        inhand_image = obs_dict['robot0_eye_in_hand_image']
+        print(f"In-hand image shape: {inhand_image.shape}, dtype: {inhand_image.dtype}, min: {inhand_image.min()}, max: {inhand_image.max()}")
+
+        predicted_label, confidence, prob_dict = classifier.predict_image(inhand_image, device=device)
+        print(f"Classifier prediction: {predicted_label} (confidence: {confidence:.3f})")
+
+        t_classifier = time.time() - t0
+
+        response = {
+            'predicted_label': int(predicted_label),
+            'confidence': float(confidence),
+            'timing': {
+                'classifier': t_classifier * 1000
+            }
+        }
+
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
     
 
 @app.route('/predict', methods=['POST'])
@@ -87,6 +129,9 @@ def predict():
         # Receive observation dictionary
         data = request.get_json()
 
+        # Check for img_policy flag
+        img_policy = data.pop('_img_policy', False)
+
         # Decode numpy arrays from base64
         obs_dict = {}
         for key, value in data.items():
@@ -94,8 +139,8 @@ def predict():
             array = np.frombuffer(array_bytes, dtype=value['dtype']).reshape(value['shape'])
             obs_dict[key] = array
 
-        # Run classifier inference if classifier is loaded
-        if classifier is not None:
+        # Run classifier inference if classifier is loaded and not using img_policy
+        if classifier is not None and not img_policy:
             t0 = time.time()
             # Get in-hand image - it's in (C, H, W) format with values in [0, 1]
             inhand_image = obs_dict['robot0_eye_in_hand_image']
@@ -116,8 +161,15 @@ def predict():
         with torch.no_grad():
             t0 = time.time()
             print(obs_dict.keys())
-            obs_dict_torch = dict_apply(obs_dict,
-                lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
+            for k, v in obs_dict.items():
+                print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+            if img_policy:
+                # img_policy: frames already stacked with time dim, only add batch dim
+                obs_dict_torch = dict_apply(obs_dict,
+                    lambda x: torch.from_numpy(x).unsqueeze(0).to(device))
+            else:
+                obs_dict_torch = dict_apply(obs_dict,
+                    lambda x: torch.from_numpy(x).unsqueeze(0).unsqueeze(1).to(device))
             torch.cuda.synchronize()
             t_to_gpu = time.time() - t0
 
@@ -133,7 +185,7 @@ def predict():
         # Encode action as base64
         action_bytes = action.tobytes()
         action_b64 = base64.b64encode(action_bytes).decode('utf-8')
-
+        print("done encoding action")
         response = {
             'action': {
                 'data': action_b64,

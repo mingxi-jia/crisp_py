@@ -22,6 +22,7 @@ from std_msgs.msg import Float64MultiArray, Int32MultiArray
 from cv_bridge import CvBridge, CvBridgeError
 import message_filters
 from pynput import keyboard
+from scipy.spatial.transform import Rotation as R
 
 
 @dataclass
@@ -169,6 +170,8 @@ class FrameRecorderNode(Node):
             msg.pose.orientation.x, msg.pose.orientation.y,
             msg.pose.orientation.z, msg.pose.orientation.w
         ], dtype=np.float32)
+        # this is the original gripper tcp pose and we will calculate the finray gripper pose later
+
         with self.data_lock:
             self.current_eef_pose = pose
 

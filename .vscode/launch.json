@@ -4,6 +4,7 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+
     
 
 
@@ -39,5 +40,32 @@
             "--ckpt-path", "/home/mingxi/Downloads/epoch=0060-val_loss=0.021 (1).ckpt"
             ]
         }
+        ,
+        {
+            "name": "Python Debugger: eval.py simple direct policy (ckpt 0080)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval/eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "args": [
+                "--mode", "simple",
+                "--n-steps", "60",
+                "--direct-policy",
+                "--ckpt-path", "/home/mingxi/Downloads/epoch=0240-val_loss=0.007.ckpt"
+            ]
+        },
+        {
+            "name": "hand pcd visal",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_policy/visualize_hand_poses_o3d.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            
+        }
+        
     ]
 }

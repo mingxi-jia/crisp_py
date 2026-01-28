@@ -3,7 +3,13 @@
 import numpy as np
 import open3d as o3d
 from diffusion_policy.model.common.rotation_transformer import RotationTransformer
+import sys
+toolbox_path = '/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool'
+sys.path.append(toolbox_path)
 from robot_filter.arm_segmentor import RobotArmSegmentation
+from hand_tool.trajectory_loader import ObservationProcessor
+
+obs_processor = ObservationProcessor()
 
 def visualize_pcd(pcd: np.ndarray, robot_pcd=None):
     """Visualize point cloud using Open3D.
@@ -79,6 +85,7 @@ def visualize_pcd_and_actions(pcd, actions, robot_pcd=None):
         action_frames.append(action_frame)
 
     # Visualize filtered pcd with robot model and EEF frame
+    pcd = obs_processor.filter_pcd_by_workspace(pcd)
     pcd_o3d = o3d.geometry.PointCloud()
     pcd_o3d.points = o3d.utility.Vector3dVector(pcd[:, :3])
     pcd_o3d.colors = o3d.utility.Vector3dVector(pcd[:, 3:])

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Unified ROS2 diffusion policy evaluation script.
 
-Supports four control modes:
+Supports six control modes:
 - simple: Sequential action execution without buffering
 - chunking: Action buffering with policy_delay offset
 - blending: Action blending in overlap regions
 - intv: Recording control with keyboard ('x' to reset, 'r' to toggle recording)
+- controlnet: Sequential control with intervention detection and re-inference
+- gello: Joint control from gello_control_signal ROS2 topic
 
 Also supports inspection mode:
 - --vis-pcd: Visualize observations without running policy or actions
@@ -14,11 +16,13 @@ Debug mode:
 - --direct-policy: Use policy directly without server (requires --ckpt-path)
 
 Examples:
-python eval/pcd_diff_eval.py --mode simple --n-steps 9999
-python eval/pcd_diff_eval.py --mode simple --n-steps 60 --debug-plotting
-python eval/pcd_diff_eval.py --mode intv  # Recording mode (no n-steps needed)
-python eval/pcd_diff_eval.py --vis-pcd  # Inspection mode
-python eval/pcd_diff_eval.py --mode simple --n-steps 60 --direct-policy --ckpt-path /path/to/checkpoint.ckpt  # Debug mode
+python eval/eval.py --mode simple --n-steps 9999
+python eval/eval.py --mode simple --n-steps 60 --debug-plotting
+python eval/eval.py --mode controlnet --n-steps 100  # ControlNet mode with intervention detection
+python eval/eval.py --mode intv  # Recording mode (no n-steps needed)
+python eval/eval.py --mode gello  # Gello joint control mode (no n-steps needed)
+python eval/eval.py --vis-pcd  # Inspection mode
+python eval/eval.py --mode simple --n-steps 60 --direct-policy --ckpt-path /home/mingxi/Downloads/epoch=0080-val_loss=0.019.ckpt  # Debug mode
 """
 
 import argparse
@@ -56,9 +60,9 @@ def parse_args():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['simple', 'chunking', 'blending', 'intv'],
+        choices=['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello'],
         default='simple',
-        help='Control mode: simple (sequential), chunking (buffered), blending (merged), or intv (recording control)'
+        help='Control mode: simple (sequential), chunking (buffered), blending (merged), intv (recording control), controlnet (intervention detection with re-inference), teleop (spacemouse teleoperation only), or gello (joint control from gello_control_signal topic)'
     )
 
     parser.add_argument(
@@ -113,6 +117,12 @@ def parse_args():
         help='Path to policy checkpoint (required when using --direct-policy)'
     )
 
+    parser.add_argument(
+        '--img-policy',
+        action='store_true',
+        help='Use image-only policy (excludes pcd, depth, joint_pos from observations)'
+    )
+
     return parser.parse_args()
 
 class MyRobot(Robot):
@@ -122,11 +132,11 @@ class MyRobot(Robot):
  
     def home(self):
         super().home()
-        init_pose = Pose(
-            position=START_POSITION,
-            orientation=R.from_euler("XYZ", [np.pi, np.pi/12, 0], degrees=False),
-        )
-        self.move_to(pose=init_pose, speed=0.15)
+        # init_pose = Pose(
+        #     position=START_POSITION,
+        #     orientation=R.from_euler("XYZ", [np.pi, np.pi/12, 0], degrees=False),
+        # )
+        # self.move_to(pose=init_pose, speed=0.15)
         self.my_gripper.set_target(1.0)
 
 def setup_robot(config: DPEvalConfig):
@@ -141,6 +151,7 @@ def setup_robot(config: DPEvalConfig):
     gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
     gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
     gripper.wait_until_ready()
+    gripper.set_target(1.0)  # Open gripper
 
     config_franka = FrankaConfig()
     config_franka.home_config = config.home_joint_position
@@ -151,15 +162,14 @@ def setup_robot(config: DPEvalConfig):
 
     print("Going to home position...")
     robot.home()
-
     robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
     robot.cartesian_controller_parameters_client.load_param_config(
         file_path="config/control/default_cartesian_impedance.yaml"
     )
 
     # print("Moving to start position...")
-    # robot.move_to(position=START_POSITION, speed=0.15)
-
+    # robot.move_to(position=START_POSITION, speed=0.1)
+    # time.sleep(1)
     return robot, gripper
 
 def setup_point_cloud_manager(toolbox_path: str):
@@ -171,7 +181,7 @@ def setup_point_cloud_manager(toolbox_path: str):
     Returns:
         Tuple of (PointCloudManager, JointStateSubscriber, spin_thread)
     """
-    config_path = os.path.join(toolbox_path, "configs", "camera_info.yaml")
+    config_path = os.path.join(toolbox_path, "robot_configs", "camera_info.yaml")
     print(f"Loading point cloud manager with config: {config_path}")
     manager = PointCloudManager(config_path)
 
@@ -285,13 +295,13 @@ def pcd_inspect(config: DPEvalConfig):
                     plt.show()
 
                     # Visualize point cloud
-                    pcd_vis = o3d.geometry.PointCloud()
-                    pcd_vis.points = o3d.utility.Vector3dVector(processed_pcd[:, :3])
-                    pcd_vis.colors = o3d.utility.Vector3dVector(processed_pcd[:, 3:])
+                    # pcd_vis = o3d.geometry.PointCloud()
+                    # pcd_vis.points = o3d.utility.Vector3dVector(processed_pcd[:, :3])
+                    # pcd_vis.colors = o3d.utility.Vector3dVector(processed_pcd[:, 3:])
                     
                     # robot_pcd = visualize_robot_pcd(processed_pcd, None, joint_state=joint_positions[1:])
                     # robot_pcd = np2o3d(robot_pcd)
-                    o3d.visualization.draw_geometries([pcd_vis], window_name=f"Step {step}: Point Cloud")
+                    # o3d.visualization.draw_geometries([pcd_vis], window_name=f"Step {step}: Point Cloud")
 
             step += 1
             rate.sleep()
@@ -333,14 +343,20 @@ def main():
         print("="*60)
         print(f"Diffusion Policy Control - Mode: {config.mode.upper()}")
         print("="*60)
-        if config.mode != 'intv':
+        if config.mode not in ['intv', 'teleop', 'gello']:
             print(f"Steps: {config.n_steps}")
-        else:
+        elif config.mode == 'intv':
             print(f"Mode: Recording control (runs until Ctrl+C)")
+        elif config.mode == 'gello':
+            print(f"Mode: Gello joint control (runs until Ctrl+C)")
+        else:
+            print(f"Mode: Teleoperation only (runs until Ctrl+C)")
         print(f"Control frequency: {config.ctrl_freq} Hz")
         print(f"Debug plotting: {config.debug_plotting}")
         print(f"Visualize observations: {config.visualize}")
-        if args.direct_policy:
+        if config.mode in ['teleop', 'gello']:
+            print(f"Policy mode: NONE ({config.mode} only)")
+        elif args.direct_policy:
             print(f"Policy mode: DIRECT (debug mode)")
             print(f"Checkpoint: {args.ckpt_path}")
         else:
@@ -349,13 +365,17 @@ def main():
         print(f"PCD server: localhost:{config.pcd_server_port}")
         print("="*60)
 
-        # Setup policy client
-        print("\nInitializing policy...")
-        if args.direct_policy:
-            policy_client = DirectPolicyWrapper(args.ckpt_path)
+        # Setup policy client (None for teleop/gello mode)
+        if config.mode in ['teleop', 'gello']:
+            print(f"\n{config.mode.capitalize()} mode: No policy client needed")
+            policy_client = None
+        elif args.direct_policy:
+            print("\nInitializing policy...")
+            policy_client = DirectPolicyWrapper(args.ckpt_path, img_policy=config.img_policy)
         else:
+            print("\nInitializing policy...")
             print("Connecting to policy server...")
-            policy_client = PolicyClient(f"http://localhost:{config.policy_server_port}")
+            policy_client = PolicyClient(f"http://localhost:{config.policy_server_port}", img_policy=config.img_policy)
         # pcd_client = PcdProcessingClient(f"http://localhost:{config.pcd_server_port}")
         rotation_transformer = RotationTransformer(from_rep='rotation_6d', to_rep='matrix')
 
@@ -385,8 +405,8 @@ def main():
         print("\n" + "="*60)
         print("STARTING CONTROL LOOP")
         print("="*60 + "\n")
-        if config.mode == 'intv':
-            # Recording mode - runs indefinitely until Ctrl+C
+        if config.mode in ['intv', 'teleop', 'gello']:
+            # Recording/teleop/gello mode - runs indefinitely until Ctrl+C
             controller.run()
         else:
             # Normal modes - run for n_steps

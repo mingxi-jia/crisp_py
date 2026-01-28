@@ -9,21 +9,6 @@ FINGER_HAND_OFFSET = 0.06  # Distance from finger tip to gripper base along z-ax
 GRIPPER_NORM_CONST = 0.05  # Normalization constant for gripper value
 START_POSITION = np.array([0.55, 0., 0.25 + FINGER_HAND_OFFSET])
 
-JOINT_THRESHOLDS = {
-    "panda_link0": 0.08,
-    "panda_link1": 0.08,
-    "panda_link2": 0.08,
-    "panda_link3": 0.08,
-    "panda_link4": 0.08,
-    "panda_link5": 0.08,
-    "panda_link6": 0.08,
-    "panda_link7": 0.08,
-    "panda_link8": 0.08,
-    "panda_hand": 0.02,
-    "panda_leftfinger": 0.02,
-    "panda_rightfinger": 0.02,
-}
-
 
 @dataclass
 class DPEvalConfig:
@@ -45,19 +30,31 @@ class DPEvalConfig:
         )
     )
 
-
+    # Safety bounds
+    eef_bounds: dict = field(
+        default_factory=lambda: {
+            'x': (0.3, 0.8),
+            'y': (-0.35, 0.35),
+            'z': (0.0, 0.61),
+        }
+    )
+    joint_delta_threshold: float = 0.2  # Max allowed deviation from home pose (rad)
 
     # Control parameters
-    ctrl_freq: float = 7.0
-    n_steps: int = 40
+    ctrl_freq: float = 10
+    n_steps: int = 20
 
+    # Spacemouse action scale
+    spacemouse_action_scale: float = 0.015
+    spacemouse_deadzone: float = 0.1
+    
     # Controller mode: 'simple', 'chunking', 'blending', 'intv'
     mode: str = 'simple'
 
     horizon: int = 16
 
     # Chunking parameters (used when mode != 'simple')
-    policy_delay: int = 3
+    policy_delay: int = 2
     action_exec_size: int = 8
 
 
@@ -68,6 +65,7 @@ class DPEvalConfig:
     debug_plotting: bool = False
     debug_output_dir: Path = field(default_factory=lambda: Path("debug_plots"))
     visualize: bool = False
+    img_policy: bool = False
 
     # Debug data saving
     save_debug_data: bool = False
@@ -79,8 +77,8 @@ class DPEvalConfig:
 
     def __post_init__(self):
         """Validate configuration."""
-        if self.mode not in ['simple', 'chunking', 'blending', 'intv']:
-            raise ValueError(f"Invalid mode: {self.mode}. Must be 'simple', 'chunking', 'blending', or 'intv'.")
+        if self.mode not in ['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello']:
+            raise ValueError(f"Invalid mode: {self.mode}. Must be 'simple', 'chunking', 'blending', 'intv', 'controlnet','teleop','gello'.")
 
         if self.mode in ['chunking', 'blending']:
             if self.action_exec_size + self.policy_delay > self.horizon:
@@ -105,4 +103,5 @@ class DPEvalConfig:
             policy_server_port=args.policy_port,
             pcd_server_port=args.pcd_port,
             visualize=args.visualize,
+            img_policy=args.img_policy,
         )

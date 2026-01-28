@@ -79,7 +79,34 @@ CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0080-val_loss=0.018.ckpt}" # Screw 
 CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0080-val_loss=0.019.ckpt}" # Screw Hand Only with rot6d (good enough) -> v1 pretrain
 # CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0240-val_loss=0.012.ckpt}" # Screw Hand finetune Relative -> v1 finetune
 CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0240-val_loss=0.007.ckpt}" # Screw Hand finetune Relative -> v1 finetune New Dataset
-CLASSIFIER_CKPT_PATH="${2:-/home/mingxi/mingxi_ws/crisp/crisp_py/eval/best_intervention_classifier_left_side.pth}"
+# CKPT_PATH="${1:-/home/mingxi/Downloads/epoch=0100-train_action_mse_error=0.014.ckpt}" # Screw Hand finetune Relative -> v1 finetune New Dataset Filtered
+
+
+CKPT_PATH="${1:-/home/mingxi/data/realworld/data/outputs/2026.01.23/18.01.03_train_diffusion_unet_image_pod_grasp_realworld_10/checkpoints/epoch=0100-train_action_mse_error=0.005.ckpt}" # Coffee Pod Lifting
+CKPT_PATH="${1:-/home/mingxi/data/realworld/data/outputs/2026.01.23/18.29.16_train_diffusion_unet_image_pod_grasp_realworld_10/checkpoints/epoch=0100-train_action_mse_error=0.005.ckpt}" # Coffee Pod Lifting
+CKPT_PATH="${1:-/home/mingxi/data/realworld/data/outputs/2026.01.23/21.47.38_train_diffusion_unet_image_pod_grasp_realworld_23/checkpoints/latest.ckpt}"
+
+CKPT_PATH="${1:-/home/mingxi/data/realworld/data/outputs/2026.01.24/17.02.28_train_diffusion_unet_image_pod_grasp_realworld_23/checkpoints/latest.ckpt}"
+
+CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/pod_lifting/data/outputs/2026.01.25/16.30.59_train_diffusion_unet_image_pod_grasp_realworld_w_offset_23/checkpoints/latest.ckpt}"
+
+
+CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/pod_lifting/data/outputs/2026.01.25/16.30.59_train_diffusion_unet_image_pod_grasp_realworld_w_offset_23/checkpoints/latest.ckpt}"
+
+
+
+# CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/pod_lifting/data/outputs/2026.01.27/10.42.58_train_diffusion_unet_image_pod_grasp_realworld_wo_offset_23/checkpoints/latest.ckpt}"
+# # CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/pod_lifting/data/outputs/2026.01.27/10.54.56_train_diffusion_unet_image_pod_grasp_realworld_wo_offset_slow_23/checkpoints/latest.ckpt}"
+
+# CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/pod_lifting/data/outputs/2026.01.27/11.19.25_train_diffusion_unet_image_pod_grasp_realworld_wo_offset_slow_23/checkpoints/latest.ckpt}"
+
+CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_sort_D1_epoch=0200-train_action_mse_error=0.000.ckpt}"
+
+CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_sort_D1_epoch=0500-train_action_mse_error=0.000.ckpt}"
+
+LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+
+CLASSIFIER_CKPT_PATH="${2:-/home/mingxi/mingxi_ws/crisp/crisp_py/eval_policy/best_intervention_classifier_left_side.pth}"
 
 PORT="${3:-6666}"
 
@@ -92,4 +119,4 @@ echo "Port: $PORT"
 echo ""
 
 which python
-python eval/server_diff_policy.py --ckpt_path "$CKPT_PATH" --classifier_ckpt_path "$CLASSIFIER_CKPT_PATH" --port "$PORT"
+python eval_policy/server_diff_policy.py --ckpt_path "$CKPT_PATH" --classifier_ckpt_path "$CLASSIFIER_CKPT_PATH" --port "$PORT"

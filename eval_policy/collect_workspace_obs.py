@@ -70,6 +70,9 @@ class WorkspaceDataCollector:
         self.target_pose = robot.end_effector_pose.copy()
         self.gripper_value = 0.0  # Open gripper
 
+        # Observation buffer for franka_obs_to_diff_obs
+        self.obs_buffer = []
+
     def generate_grid_points(self, x_range, y_range, z_range, spacing):
         """Generate grid points in the workspace.
 
@@ -125,9 +128,27 @@ class WorkspaceDataCollector:
 
         eef_pose = get_pose_from_robot(self.robot.end_effector_pose)
 
+        # Capture current observation snapshot
+        cam4_rgb, cam4_depth = self.obs_manager.get_latest_rgbd('cam4')
+        obs_snapshot = {
+            'eef_pos': eef_pose[:3].astype(np.float32),
+            'eef_quat': eef_pose[3:].astype(np.float32),
+            'gripper_qpos': np.array([gripper_state, gripper_state], dtype=np.float32),
+            'joint_pos': joint_state.astype(np.float32),
+            'cam4_rgb': cam4_rgb.copy(),
+            'cam4_depth': cam4_depth.copy(),
+            'pcd': self.obs_manager.get_latest_pointcloud(),
+        }
+
+        # Add to buffer and ensure at least 2 frames
+        self.obs_buffer.append(obs_snapshot)
+        while len(self.obs_buffer) < 2:
+            self.obs_buffer.insert(0, obs_snapshot.copy())
+        if len(self.obs_buffer) > 20:
+            self.obs_buffer.pop(0)
+
         obs_dict = franka_obs_to_diff_obs(
-            self.obs_manager, eef_pose, gripper_state,
-            self.pcd_client, joint_state, visualize=False
+            self.obs_buffer, img_policy=False, visualize=False
         )
 
         return obs_dict

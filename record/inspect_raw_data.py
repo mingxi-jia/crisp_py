@@ -8,6 +8,7 @@ import argparse
 from pathlib import Path
 import cv2
 import numpy as np
+import shutil
 
 
 def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, load_eef_pose=False, load_intervention=False, min_traj_length=0):
@@ -28,7 +29,8 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
             'frames': {frame_idx: {cam_idx: image_path}},
             'grasp_actions': numpy array of gripper values,
             'eef_pose': numpy array of end-effector poses (if load_eef_pose=True),
-            'intervention_flags': numpy array of intervention flags (if load_intervention=True)
+            'intervention_flags': numpy array of intervention flags (if load_intervention=True),
+            'false_marked': boolean indicating if false_mark.txt exists
         }
     """
     episodes_path = Path(episodes_path)
@@ -158,6 +160,13 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
             else:
                 print(f"\n  Warning: {intervention_file} does not exist")
 
+        # Check for false_mark.txt
+        if use_segmented:
+            false_mark_file = episode_dir / "false_mark.txt"
+        else:
+            false_mark_file = episode_dir / "state" / "false_mark.txt"
+        false_marked = false_mark_file.exists()
+
         episodes_data.append({
             'name': episode_dir.name,
             'path': episode_dir,
@@ -165,7 +174,8 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
             'num_frames': min_frames,
             'grasp_actions': grasp_actions,
             'eef_pose': eef_pose,
-            'intervention_flags': intervention_flags
+            'intervention_flags': intervention_flags,
+            'false_marked': false_marked
         })
 
         print(f"{min_frames} frames")
@@ -264,7 +274,42 @@ def create_intervention_bar(width, intervention_value, bar_height=40):
     return bar
 
 
-def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, show_intervention=False):
+def create_false_mark_bar(width, is_false_marked, bar_height=40):
+    """
+    Create a false mark indicator visualization bar.
+
+    Args:
+        width: width of the bar
+        is_false_marked: True if episode is marked as false
+        bar_height: height of the bar
+
+    Returns:
+        numpy array: bar visualization
+    """
+    bar = np.zeros((bar_height, width, 3), dtype=np.uint8)
+
+    if is_false_marked:
+        # Red background for false marked episodes
+        bar[:, :] = (0, 0, 200)  # BGR: red
+        label = "FALSE MARKED EPISODE"
+        text_color = (255, 255, 255)
+    else:
+        # Dark gray background (no mark)
+        bar[:, :] = (40, 40, 40)
+        label = "Episode OK"
+        text_color = (150, 150, 150)
+
+    # Border
+    cv2.rectangle(bar, (0, 0), (width - 1, bar_height - 1), (100, 100, 100), 2)
+
+    # Add text label
+    cv2.putText(bar, label, (10, bar_height - 12),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+
+    return bar
+
+
+def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, show_intervention=False, show_false_mark=True):
     """
     Create visualization for a single frame from one episode.
     Layout: Cam 1-3 horizontally, Cam 4 (in-hand) on the right side.
@@ -274,6 +319,7 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
         frame_idx: which frame to visualize
         max_height: maximum height for each camera image
         show_intervention: if True, show intervention indicator bar
+        show_false_mark: if True, show false mark indicator bar
 
     Returns:
         numpy array: concatenated image with all cameras and gripper/intervention bars
@@ -368,6 +414,12 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
         intervention_bar = create_intervention_bar(concat_img.shape[1], intervention_value, bar_height=50)
         bars.append(intervention_bar)
 
+    # Add false mark bar
+    if show_false_mark:
+        is_false_marked = episode_data.get('false_marked', False)
+        false_mark_bar = create_false_mark_bar(concat_img.shape[1], is_false_marked, bar_height=50)
+        bars.append(false_mark_bar)
+
     # Combine header, image, and bars
     final_img = np.vstack([header, concat_img] + bars)
 
@@ -394,6 +446,7 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
         - 'r': Reset to first frame
         - 'n': Next episode
         - 'p': Previous episode
+        - 'd': Delete current episode (move to trash)
     """
     # Intervention mode includes teleop features plus intervention tracking
     load_eef = teleop_mode or intervention_mode
@@ -408,6 +461,11 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
         return
 
     print(f"\nTotal episodes: {len(episodes_data)}")
+
+    # Create trash folder for deleted episodes
+    trash_folder = Path(episodes_path) / ".trash"
+    trash_folder.mkdir(exist_ok=True)
+    print(f"Trash folder: {trash_folder}")
 
     window_name = "Episode Viewer"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -447,7 +505,7 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
 
         # Controls
-        controls_text = "Up/Down: Episodes | Left/Right: Frames | Space: Auto-play | Q: Quit"
+        controls_text = "Up/Down: Episodes | Left/Right: Frames | Space: Auto-play | D: Delete | Q: Quit"
         text_size = cv2.getTextSize(controls_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
         cv2.putText(info_bar, controls_text,
                    (concat_img.shape[1] - text_size[0] - 10, 35),
@@ -501,6 +559,37 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
             auto_play = False
             print(f"Switched to episode {current_episode_idx + 1}: {episodes_data[current_episode_idx]['name']}")
 
+        elif key == ord('d'):  # Delete current episode
+            auto_play = False
+            if len(episodes_data) > 0:
+                episode_to_delete = episodes_data[current_episode_idx]
+                episode_path = episode_to_delete['path']
+                episode_name = episode_to_delete['name']
+
+                # Move to trash folder
+                trash_dest = trash_folder / episode_name
+                try:
+                    # If destination exists in trash, add timestamp
+                    if trash_dest.exists():
+                        import time
+                        trash_dest = trash_folder / f"{episode_name}_{int(time.time())}"
+                    shutil.move(str(episode_path), str(trash_dest))
+                    print(f"Deleted episode '{episode_name}' -> moved to {trash_dest}")
+
+                    # Remove from episodes_data list
+                    episodes_data.pop(current_episode_idx)
+
+                    # Adjust current index if needed
+                    if len(episodes_data) == 0:
+                        print("No more episodes to display!")
+                        break
+                    if current_episode_idx >= len(episodes_data):
+                        current_episode_idx = len(episodes_data) - 1
+                    current_frame = 0
+                    print(f"Now viewing episode {current_episode_idx + 1}/{len(episodes_data)}: {episodes_data[current_episode_idx]['name']}")
+                except Exception as e:
+                    print(f"Error deleting episode: {e}")
+
         # Auto-play: advance frame
         if auto_play:
             current_frame += 1
@@ -552,6 +641,7 @@ Controls:
   Space: Toggle auto-play (plays frames and moves to next episode)
   N/P: Next/Previous episode
   R: Reset to first frame
+  D: Delete current episode (moves to .trash folder for undo)
   Q/ESC: Quit
         """
     )

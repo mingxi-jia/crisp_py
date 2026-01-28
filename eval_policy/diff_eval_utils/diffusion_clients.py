@@ -18,8 +18,9 @@ from diffusion_policy.common.pytorch_util import dict_apply
 class PolicyClient:
     """Client for communicating with the policy server."""
 
-    def __init__(self, server_url: str = "http://localhost:5000"):
+    def __init__(self, server_url: str = "http://localhost:5000", img_policy: bool = False):
         self.server_url = server_url
+        self.img_policy = img_policy
         self._check_health()
 
     def _check_health(self):
@@ -32,6 +33,46 @@ class PolicyClient:
                 raise ConnectionError("Policy server unhealthy")
         except Exception as e:
             raise ConnectionError(f"Cannot connect to policy server: {e}")
+        
+    def predict_intervention(self, inhand_rgb: np.ndarray) -> tuple[int, float, dict]:
+        """Get intervention prediction from server.
+
+        Args:
+            inhand_rgb: In-hand RGB image (C, H, W) format with values in [0, 1]
+
+        Returns:
+            Tuple of (predicted_label, confidence, timing_dict)
+        """
+        # Encode observation as base64
+        data = {
+            'robot0_eye_in_hand_image': {
+                'data': base64.b64encode(inhand_rgb.tobytes()).decode('utf-8'),
+                'dtype': str(inhand_rgb.dtype),
+                'shape': inhand_rgb.shape
+            }
+        }
+
+        # Send request
+        response = requests.post(
+            f"{self.server_url}/predict_intv",
+            json=data,
+            timeout=30
+        )
+
+        if response.status_code != 200:
+            try:
+                error_msg = response.json()
+            except:
+                error_msg = response.text
+            raise RuntimeError(f"Server error (status {response.status_code}): {error_msg}")
+
+        result = response.json()
+
+        predicted_label = result['predicted_label']
+        confidence = result['confidence']
+        timing = result.get('timing', {})
+
+        return predicted_label, confidence, timing
 
     def predict_action(self, obs_dict: dict) -> np.ndarray:
         """Get action prediction from server.
@@ -54,6 +95,9 @@ class PolicyClient:
                 'dtype': str(value.dtype),
                 'shape': value.shape
             }
+
+        # Add img_policy flag
+        data['_img_policy'] = self.img_policy
 
         # Send request
         response = requests.post(
@@ -218,13 +262,15 @@ class DirectPolicyWrapper:
     This is useful for debugging to bypass server communication overhead.
     """
 
-    def __init__(self, ckpt_path: str):
+    def __init__(self, ckpt_path: str, img_policy: bool = False):
         """Initialize policy directly from checkpoint.
 
         Args:
             ckpt_path: Path to policy checkpoint file
+            img_policy: Whether to use image-only policy (excludes is_contact)
         """
         self.ckpt_path = ckpt_path
+        self.img_policy = img_policy
         self.policy = None
         self.device = None
         self._initialize_policy()
@@ -263,8 +309,15 @@ class DirectPolicyWrapper:
         """
         with torch.no_grad():
             # Convert numpy observations to torch tensors
-            obs_dict_torch = dict_apply(obs_dict,
-                lambda x: torch.from_numpy(x.copy()).unsqueeze(0).unsqueeze(1).to(self.device))
+            if not self.img_policy:
+                obs_dict['is_contact'] = np.array([0], dtype=np.float32)
+            if self.img_policy:
+                # img_policy: frames already stacked with time dim, only add batch dim
+                obs_dict_torch = dict_apply(obs_dict,
+                    lambda x: torch.from_numpy(x.copy()).unsqueeze(0).to(self.device))
+            else:
+                obs_dict_torch = dict_apply(obs_dict,
+                    lambda x: torch.from_numpy(x.copy()).unsqueeze(0).unsqueeze(1).to(self.device))
 
             # Run inference
             result = self.policy.predict_action(obs_dict_torch)

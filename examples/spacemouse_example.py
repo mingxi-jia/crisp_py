@@ -14,10 +14,14 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 
 from pynput import keyboard
+from eval.eval import setup_robot
+from eval.diff_eval_utils.diffusion_constants import DPEvalConfig
 
 def main():
     ctrl_freq = 10.0  # Hz
-    action_scale = 0.01  # 1 cm per action unit
+    action_scale = 0.015  # 1 cm per action unit
+
+    config = DPEvalConfig()
 
     # Shared state for keyboard reset trigger
     reset_requested = {'flag': False}
@@ -40,30 +44,7 @@ def main():
     listener.start()
 
     ### ---- Robot Setup ----- ###
-    robot = Robot(namespace="")
-    robot.wait_until_ready()
-    print(f"Robot ready. Current joint values: {robot.joint_values}")
-    print(robot.end_effector_pose)
-    print(robot.joint_values)
-    print("Going to home position...")
-    robot.home()
-
-    robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
-    robot.cartesian_controller_parameters_client.load_param_config(
-        file_path="config/control/spacemouse_cartesian_impedance.yaml"
-    )
-    time.sleep(2.0)
-
-    print("Going to start position...")
-    home_pose = Pose(position=np.array([0.6, 0., 0.35]), orientation=R.from_euler('XYZ', [np.pi, 0, 0]))
-    robot.move_to(pose=home_pose, speed=0.15)
-
-    # Initialize gripper
-    gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
-    gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
-    gripper.wait_until_ready()
-    gripper.set_target(1.0)
-    print("Gripper ready")
+    robot, gripper = setup_robot(config)
 
     target_pose = robot.end_effector_pose
     target_xyz = np.array(target_pose.position)
@@ -99,7 +80,7 @@ def main():
                     gripper_closed['value'] = False
                     time.sleep(1.0)
 
-                    robot.move_to(pose=home_pose, speed=0.15)
+                    robot.move_to(position=[0.6, 0.0, 0.3], pose=R.from_euler('XYZ', [0, np.pi/12, 0]), speed=0.1)
 
                     target_pose = robot.end_effector_pose
                     target_xyz = np.array(target_pose.position)
@@ -116,7 +97,7 @@ def main():
             spacemouse_eef_action = sm.get_motion_state_transformed()
             button_pressed = sm.is_button_pressed(0)  # is pressed -> True
             dx, dy, dz, droll, dpitch, dyaw = spacemouse_eef_action * action_scale
-
+            # droll, dpitch, dyaw = 0, 0, 0
             # Publish spacemouse signals
             # Format: [dx, dy, dz, droll, dpitch, dyaw, gripper_toggle, reset]
             spacemouse_msg = Int32MultiArray()
@@ -128,7 +109,11 @@ def main():
             droll_int = (1 if droll > 0 else -1 if droll < 0 else 0)
             dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
             dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
-            spacemouse_msg.data = [dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, gripper_toggle, 0]
+            if dx_int != 0 or dy_int != 0 or dz_int != 0 or droll_int != 0 or dpitch_int != 0 or dyaw_int != 0:
+                intv_state = 2
+            else:
+                intv_state = 0
+            spacemouse_msg.data = [intv_state, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, gripper_toggle, 0]
             spacemouse_pub.publish(spacemouse_msg)
 
             if np.linalg.norm(target_pose.position - robot.end_effector_pose.position) > 0.05:

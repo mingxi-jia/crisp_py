@@ -32,11 +32,13 @@ class PointCloudManager(Node):
 
         # Load camera parameters
         with open(config_path, "r") as f:
+            print(f"Loading camera config from: {config_path}")
             self.cam_params = yaml.safe_load(f)
 
         # Precompute rotation matrices for faster processing
         self.transforms = {}
         for cam_name in ["cam1", "cam2", "cam3"]:
+            print(f"Camera {cam_name} extrinsics: {self.cam_params[cam_name]}")
             R = Rotation.from_quat(self.cam_params[cam_name]["q"]).as_matrix()
             t = np.array(self.cam_params[cam_name]["t"])
             self.transforms[cam_name] = (R, t)
@@ -58,7 +60,7 @@ class PointCloudManager(Node):
             depth_sub = Subscriber(self, Image, f"/cam{i}/aligned_depth_to_color/image_raw", qos_profile=qos)
             self.rgb_subs.append(rgb_sub)
             self.depth_subs.append(depth_sub)
-        
+
         self.inhand_rgb_sub = Subscriber(self, Image, f"/cam4/color/image_rect_raw", qos_profile=qos)
         self.inhand_depth_sub = Subscriber(self, Image, f"/cam4/aligned_depth_to_color/image_raw", qos_profile=qos)
         self.inhand_sub = [self.inhand_rgb_sub, self.inhand_depth_sub]
@@ -121,6 +123,7 @@ class PointCloudManager(Node):
     def sync_callback(self, rgb1, rgb2, rgb3, depth1, depth2, depth3, inhand_rgb, inhand_depth):
         """Process synchronized RGB-D images from all cameras."""
         try:
+            # print("Received synchronized images")
             # Convert ROS images to numpy
             self.rgb_images = [
                 self.bridge.imgmsg_to_cv2(img, "rgb8")
@@ -155,7 +158,7 @@ class PointCloudManager(Node):
         all_colors = []
 
         for i, (rgb, depth) in enumerate(zip(self.rgb_images, self.depth_images), 1):
-            # if i != 3:
+            # if i != 2:
             #     continue
             cam_name = f"cam{i}"
             cam_params = self.cam_params[cam_name]
@@ -197,7 +200,7 @@ def main():
     rclpy.init()
 
     # Get config path
-    config_path = Path(__file__).parent.parent / "config" / "camera_info.yaml"
+    config_path = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/robot_configs/camera_info.yaml"
 
     # Create manager with downsampling for faster processing
     manager = PointCloudManager(str(config_path), downsample=2)

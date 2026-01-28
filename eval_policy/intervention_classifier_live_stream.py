@@ -190,9 +190,10 @@ def camera_visualization_thread(manager, model, camera_name='cam4', device='cuda
 def main():
     intervention_classifier_path = "examples/best_intervention_classifier.pth"
     intervention_classifier_path = "eval/best_intervention_classifier_top_left_corner.pth"
+    intervention_classifier_path = "eval_policy/best_intervention_classifier_left_side.pth"
     
     camera_name = 'cam4'  # Wrist camera name
-    config_path = "config/camera_info.yaml"  # Camera config path
+    config_path = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/robot_configs/camera_info.yaml"  # Camera config path
 
     # Initialize ROS2
     rclpy.init()
