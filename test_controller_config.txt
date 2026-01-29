@@ -1,0 +1,190 @@
+ Let me explain each parameter and its physical meaning.                                                                  
+                                                                                                                           
+  Nullspace Parameters                                                                                                     
+                                                                                                                           
+  The Franka robot has 7 joints but only needs 6 DOF for end-effector pose. This extra degree of freedom is the nullspace -
+   the robot can move joints without changing the end-effector position.                                                   
+                                                                                                                           
+  projector_type                                                                                                           
+                                                                                                                           
+  projector_type: pseudo_inverse  # or "none"                                                                              
+  - pseudo_inverse: Uses the Moore-Penrose pseudo-inverse of the Jacobian to project torques into nullspace. Allows the    
+  robot to achieve secondary objectives (e.g., avoid joint limits) while maintaining end-effector pose.                    
+  - none: Disables nullspace projection. Use this for direct joint control where you don't want any "background" joint     
+  motion.                                                                                                                  
+                                                                                                                           
+  stiffness                                                                                                                
+                                                                                                                           
+  stiffness: 2.0  # Range: 0.0 to 5.0+                                                                                     
+  The "spring constant" for pulling joints toward a reference configuration in the nullspace.                              
+  ┌───────┬───────────────────────────────────────────────────┐                                                            
+  │ Value │                     Behavior                      │                                                            
+  ├───────┼───────────────────────────────────────────────────┤                                                            
+  │ 0.0   │ Joints float freely in nullspace (very compliant) │                                                            
+  ├───────┼───────────────────────────────────────────────────┤                                                            
+  │ 2.0   │ Gentle pull toward reference config               │                                                            
+  ├───────┼───────────────────────────────────────────────────┤                                                            
+  │ 5.0+  │ Strong pull toward reference config (stiff)       │                                                            
+  └───────┴───────────────────────────────────────────────────┘                                                            
+  Use case: Higher values keep the elbow in a predictable position; lower values allow the arm to "droop" or be pushed     
+  around.                                                                                                                  
+                                                                                                                           
+  damping                                                                                                                  
+                                                                                                                           
+  damping: 1.0  # Range: 0.5 to 10.0                                                                                       
+  Resistance to velocity in nullspace. Prevents oscillations.                                                              
+  ┌──────────────┬──────────────────────────────────────────────┐                                                          
+  │    Value     │                   Behavior                   │                                                          
+  ├──────────────┼──────────────────────────────────────────────┤                                                          
+  │ Low (~0.5)   │ Fast nullspace motion, possible oscillations │                                                          
+  ├──────────────┼──────────────────────────────────────────────┤                                                          
+  │ ~1.0         │ Near critical damping (smooth settling)      │                                                          
+  ├──────────────┼──────────────────────────────────────────────┤                                                          
+  │ High (~10.0) │ Sluggish nullspace motion, overdamped        │                                                          
+  └──────────────┴──────────────────────────────────────────────┘                                                          
+  Rule of thumb: Set damping ≈ 2×√(stiffness) for critical damping.                                                        
+                                                                                                                           
+  regularization                                                                                                           
+                                                                                                                           
+  regularization: 1.0e-06                                                                                                  
+  Added to the diagonal of J×Jᵀ before inversion (damped least squares). Prevents numerical instability near singularities.
+  ┌───────┬───────────────────────────────────────────────────────┐                                                        
+  │ Value │                       Behavior                        │                                                        
+  ├───────┼───────────────────────────────────────────────────────┤                                                        
+  │ 1e-8  │ Minimal regularization, more accurate but less stable │                                                        
+  ├───────┼───────────────────────────────────────────────────────┤                                                        
+  │ 1e-6  │ Good balance (typical)                                │                                                        
+  ├───────┼───────────────────────────────────────────────────────┤                                                        
+  │ 1e-4  │ Heavy regularization, more stable but less accurate   │                                                        
+  └───────┴───────────────────────────────────────────────────────┘                                                        
+  Use case: Increase if you see jerky motion near stretched-out or folded arm configurations.                              
+                                                                                                                           
+  weights                                                                                                                  
+                                                                                                                           
+  weights:                                                                                                                 
+    right_fr3_joint1: 15.0  # base rotation                                                                                
+    right_fr3_joint2: 15.0  # shoulder                                                                                     
+    right_fr3_joint3: 8.0                                                                                                  
+    right_fr3_joint4: 8.0                                                                                                  
+    right_fr3_joint5: 8.0                                                                                                  
+    right_fr3_joint6: 5.0                                                                                                  
+    right_fr3_joint7: 5.0   # wrist rotation                                                                               
+  Weighted pseudo-inverse for prioritizing which joints move in nullspace.                                                 
+  ┌───────────────┬────────────────────────────────────────────┐                                                           
+  │    Weight     │                   Effect                   │                                                           
+  ├───────────────┼────────────────────────────────────────────┤                                                           
+  │ Higher (15.0) │ Joint moves less - it's "expensive" to use │                                                           
+  ├───────────────┼────────────────────────────────────────────┤                                                           
+  │ Lower (5.0)   │ Joint moves more - it's "cheap" to use     │                                                           
+  └───────────────┴────────────────────────────────────────────┘                                                           
+  Physical meaning: With the weights above, the base joints (1-2) stay relatively fixed while the wrist (6-7) absorbs most 
+  nullspace motion. Useful for keeping the arm's overall posture stable.                                                   
+                                                                                                                           
+  ---                                                                                                                      
+  Operational Space Parameters                                                                                             
+                                                                                                                           
+  use_local_jacobian                                                                                                       
+                                                                                                                           
+  use_local_jacobian: true  # or false                                                                                     
+  Which reference frame to compute the Jacobian in.                                                                        
+  ┌───────┬─────────────────────────────────────────────────┐                                                              
+  │ Value │                     Meaning                     │                                                              
+  ├───────┼─────────────────────────────────────────────────┤                                                              
+  │ true  │ Jacobian computed in end-effector frame (local) │                                                              
+  ├───────┼─────────────────────────────────────────────────┤                                                              
+  │ false │ Jacobian computed in base frame (global)        │                                                              
+  └───────┴─────────────────────────────────────────────────┘                                                              
+  Practical difference:                                                                                                    
+  - Local: Control feels more intuitive - "push forward" means forward relative to the gripper                             
+  - Global: Control is in world coordinates - "push forward" means +X in base frame                                        
+                                                                                                                           
+  use_operational_space                                                                                                    
+                                                                                                                           
+  use_operational_space: true  # or false                                                                                  
+  Enables full operational space control (Khatib, 1987) vs simple Cartesian impedance.                                     
+  ┌───────┬───────────────────────────────────────────────────────────────────┐                                            
+  │ Value │                            Control Law                            │                                            
+  ├───────┼───────────────────────────────────────────────────────────────────┤                                            
+  │ false │ τ = Jᵀ × F (simple Jacobian transpose)                            │                                            
+  ├───────┼───────────────────────────────────────────────────────────────────┤                                            
+  │ true  │ τ = Jᵀ × Λ × (K×e + D×ė) where Λ is the task-space inertia matrix │                                            
+  └───────┴───────────────────────────────────────────────────────────────────┘                                            
+  Practical difference:                                                                                                    
+  - false: Simpler, faster, but end-effector inertia varies with configuration                                             
+  - true: Consistent end-effector dynamics regardless of arm pose, but computationally heavier                             
+                                                                                                                           
+  task.k_pos_x/y/z                                                                                                         
+                                                                                                                           
+  task:                                                                                                                    
+    k_pos_x: 500.0  # N/m                                                                                                  
+    k_pos_y: 500.0                                                                                                         
+    k_pos_z: 500.0                                                                                                         
+  Position stiffness - how hard the controller "pulls" toward the target position.                                         
+  ┌─────────┬─────────────────────────────────────────┐                                                                    
+  │  Value  │                Behavior                 │                                                                    
+  ├─────────┼─────────────────────────────────────────┤                                                                    
+  │ 0       │ No position control (gravity comp only) │                                                                    
+  ├─────────┼─────────────────────────────────────────┤                                                                    
+  │ 100-300 │ Soft, compliant (safe for contact)      │                                                                    
+  ├─────────┼─────────────────────────────────────────┤                                                                    
+  │ 500-800 │ Medium stiffness (typical manipulation) │                                                                    
+  ├─────────┼─────────────────────────────────────────┤                                                                    
+  │ 1000+   │ Stiff, precise tracking                 │                                                                    
+  └─────────┴─────────────────────────────────────────┘                                                                    
+  Physical analogy: A 500 N/m spring means 1cm error produces 5N of corrective force.                                      
+                                                                                                                           
+  task.k_rot_x/y/z                                                                                                         
+                                                                                                                           
+  task:                                                                                                                    
+    k_rot_x: 60.0  # Nm/rad                                                                                                
+    k_rot_y: 60.0                                                                                                          
+    k_rot_z: 60.0                                                                                                          
+  Rotational stiffness - how hard the controller maintains orientation.                                                    
+  ┌───────┬────────────────────────────┐                                                                                   
+  │ Value │          Behavior          │                                                                                   
+  ├───────┼────────────────────────────┤                                                                                   
+  │ 0     │ Free rotation              │                                                                                   
+  ├───────┼────────────────────────────┤                                                                                   
+  │ 30-60 │ Compliant orientation      │                                                                                   
+  ├───────┼────────────────────────────┤                                                                                   
+  │ 100+  │ Stiff orientation tracking │                                                                                   
+  └───────┴────────────────────────────┘                                                                                   
+  Note: Rotation is usually set lower than position because orientation errors cause less safety concern.                  
+                                                                                                                           
+  task.d_pos_x/y/z and task.d_rot_x/y/z                                                                                    
+                                                                                                                           
+  task:                                                                                                                    
+    d_pos_x: 45.0  # N·s/m                                                                                                 
+    d_rot_x: 15.0  # Nm·s/rad                                                                                              
+  Damping coefficients - resistance to velocity.                                                                           
+                                                                                                                           
+  Rule of thumb: For critical damping, use d ≈ 2×√(k × m) where m is effective mass (~2-5 kg for Franka end-effector).     
+  ┌──────────┬─────────────────────────┐                                                                                   
+  │ Damping  │        Behavior         │                                                                                   
+  ├──────────┼─────────────────────────┤                                                                                   
+  │ Too low  │ Oscillations, overshoot │                                                                                   
+  ├──────────┼─────────────────────────┤                                                                                   
+  │ Critical │ Smooth, fast settling   │                                                                                   
+  ├──────────┼─────────────────────────┤                                                                                   
+  │ Too high │ Sluggish response       │                                                                                   
+  └──────────┴─────────────────────────┘                                                                                   
+  ---                                                                                                                      
+  Summary Table                                                                                                            
+  ┌──────────────────────────┬───────────────────────────┬────────────────────┬────────────────────────┐                   
+  │        Parameter         │     What it controls      │     Low value      │       High value       │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ nullspace.stiffness      │ Joint posture maintenance │ Floppy arm         │ Rigid posture          │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ nullspace.damping        │ Nullspace oscillation     │ Bouncy             │ Sluggish               │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ nullspace.regularization │ Singularity stability     │ Accurate but risky │ Stable but approximate │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ nullspace.weights        │ Which joints move         │ Moves more         │ Moves less             │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ task.k_pos_*             │ Position tracking         │ Compliant          │ Stiff                  │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ task.k_rot_*             │ Orientation tracking      │ Free rotation      │ Locked orientation     │                   
+  ├──────────────────────────┼───────────────────────────┼────────────────────┼────────────────────────┤                   
+  │ task.d_*                 │ Oscillation damping       │ Bouncy             │ Sluggish               │                   
+  └──────────────────────────┴───────────────────────────┴────────────────────┴────────────────────────┘                   
+  Would you like me to show you how to create a custom config file with specific parameter values for your use case?

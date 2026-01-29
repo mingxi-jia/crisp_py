@@ -1,10 +1,8 @@
 from diff_eval_utils.controllers.base_controller import RobotController
 import time
 import numpy as np
-from pathlib import Path
 import threading
 import shutil
-from datetime import datetime
 import matplotlib.pyplot as plt
 from matplotlib import cm, ticker
 
@@ -31,20 +29,6 @@ class ChunkingController(RobotController):
         if self.config.debug_plotting:
             self._setup_debug_plotting()
 
-        # Debug data collection
-        if self.config.save_debug_data:
-            self.debug_data_collection = {
-                'action_chunks': [],      # (timestamp_ms, array(16,10))
-                'executed_actions': [],   # (timestamp_ms, array(10,))
-                'eef_poses': [],          # (timestamp_ms, pose_dict)
-                'point_clouds': [],       # (timestamp_ms, array(N,6))
-                'robot0_eef_pos': [],     # (timestamp_ms, array(3,))
-                'actual_eef_pos': [],     # (timestamp_ms, array(3,))
-                'pcd_timestamps': []     # (timestamp_ms, pcd_timestamp)
-            }
-        else:
-            self.debug_data_collection = None
-
 
     def _setup_debug_plotting(self):
         """Initialize debug plotting data structures."""
@@ -60,21 +44,10 @@ class ChunkingController(RobotController):
 
     def _need_inference(self):
         """Check if we need to run policy inference."""
-        need_inf = len(self.action_queue) <= self.config.policy_delay
-        if need_inf:
-            print(f"\n[Inference Needed] Current action queue size: {len(self.action_queue)}")
-        return need_inf
+        return len(self.action_queue) <= self.config.policy_delay
 
     def _run_inference(self):
         """Run policy inference and add actions to queue."""
-        current_time = time.time()
-
-        if self.last_inference_time is not None:
-            time_since_last = current_time - self.last_inference_time
-            print(f"\n{'='*50}")
-            print(f"[Inference #{self.inference_count}] Time since last: {time_since_last*1000:.1f} ms")
-            print(f"{'='*50}")
-
         # Get observation and predict
         obs_dict = self._get_observation()
         actions = self.policy_client.predict_action(obs_dict)
@@ -90,37 +63,26 @@ class ChunkingController(RobotController):
                 self.action_queue.append((action.copy(), self.inference_count))
         else:
             # Subsequent: add actions starting from policy_delay
-            start_idx = self.config.policy_delay + 4
+            start_idx = self.config.policy_delay + 2
             end_idx = start_idx + self.config.action_exec_size
             for action in actions[start_idx:end_idx]:
                 self.action_queue.append((action.copy(), self.inference_count))
 
         self.last_inference_time = time.time()
-        print(f"Inference took {(self.last_inference_time - current_time)*1000:.1f} ms")
         self.inference_count += 1
 
     def _run_inference_async(self):
         """Run inference in background thread."""
         def inference_worker():
             try:
-                current_time = time.time()
-
-                if self.last_inference_time is not None:
-                    time_since_last = current_time - self.last_inference_time
-                    print(f"\n{'='*50}")
-                    print(f"[Inference #{self.inference_count}] Time since last: {time_since_last*1000:.1f} ms")
-                    print(f"{'='*50}")
-
                 # Get observation and predict
                 obs_dict = self._get_observation()
                 actions = self.policy_client.predict_action(obs_dict)
-                inference_time = time.time()
 
                 # Store for debug plotting
                 if self.config.debug_plotting:
                     self.all_predicted_chunks.append((self.inference_count, actions.copy()))
-                if len(self.action_queue) == 0:
-                    print("no actions in queue")
+
                 # Thread-safe queue update
                 with self.inference_lock:
                     if self.first_inference_round:
@@ -133,44 +95,7 @@ class ChunkingController(RobotController):
                         for action in actions[start_idx:end_idx]:
                             self.action_queue.append((action.copy(), self.inference_count))
 
-                    # Debug data collection
-                    if self.debug_data_collection is not None:
-                        timestamp_ms = int(inference_time * 1000)
-
-                        # Save action chunk
-                        self.debug_data_collection['action_chunks'].append(
-                            (timestamp_ms, actions.copy())
-                        )
-
-                        # Save point cloud
-                        pcd = obs_dict.get('pcd', None)
-                        if pcd is not None:
-                            self.debug_data_collection['point_clouds'].append(
-                                (timestamp_ms, pcd.copy())
-                            )
-
-                        # Save robot0_eef_pos
-                        robot0_eef_pos = obs_dict.get('robot0_eef_pos', None)
-                        if robot0_eef_pos is not None:
-                            self.debug_data_collection['robot0_eef_pos'].append(
-                                (timestamp_ms, robot0_eef_pos.copy())
-                            )
-
-                        # Save RGBD timestamp
-                        pcd_timestamp = obs_dict.get('pcd_timestamp', None)
-                        if pcd_timestamp is not None:
-                            # Ensure we create an independent copy (not a reference)
-                            if isinstance(pcd_timestamp, np.ndarray):
-                                ts_copy = pcd_timestamp.copy()
-                            else:
-                                ts_copy = np.array(pcd_timestamp).copy()
-                            print(f"Saving RGBD timestamp: {ts_copy[0]}")
-                            self.debug_data_collection['pcd_timestamps'].append(
-                                (timestamp_ms, ts_copy[0])
-                            )
-
                     self.last_inference_time = time.time()
-                    print(f"Inference took {(self.last_inference_time - current_time)*1000:.1f} ms")
                     self.inference_count += 1
 
             finally:
@@ -189,7 +114,8 @@ class ChunkingController(RobotController):
             time_since_last_exec += timing_adjust_constant
             if time_since_last_exec < self.execute_dt:
                 time_to_wait = self.execute_dt - time_since_last_exec
-                time.sleep(time_to_wait - timing_adjust_constant)
+
+                time.sleep(np.clip(time_to_wait - timing_adjust_constant, 0, 1))
 
     def run(self, n_steps: int):
         """Execute chunking control with async inference."""
@@ -203,7 +129,6 @@ class ChunkingController(RobotController):
         while self.inference_in_progress:
             time.sleep(0.002)  # Wait for first inference
 
-        print("\nStarting chunking control...")
         self.first_inference_round = True
         while n_steps_done < n_steps:
             loop_start = time.time()
@@ -217,16 +142,15 @@ class ChunkingController(RobotController):
                 queue_has_actions = len(self.action_queue) > 0
                 if queue_has_actions:
                     action, inference_count = self.action_queue.pop(0)
-    
+
             if queue_has_actions:
                 # Enforce fixed control frequency
                 if self.enforce_fixed_freq:
                     self._enforce_fixed_frequency()
                 if inference_count == 0:
                     time.sleep(0.05)
-                print("Executing action from inference #{}".format(inference_count))
                 self._execute_action(action)
-                self.last_execution_time = time.time() # Update execution time
+                self.last_execution_time = time.time()
 
                 if self.config.debug_plotting:
                     current_pose = self.robot.end_effector_pose
@@ -238,7 +162,6 @@ class ChunkingController(RobotController):
                                              current_pose.position[2], yaw))
                 n_steps_done += 1
             else:
-                print("Warning: Action queue empty, waiting for inference...")
                 time.sleep(0.01)
 
             if self.config.debug_plotting:
@@ -249,22 +172,14 @@ class ChunkingController(RobotController):
         if self.inference_thread is not None:
             self.inference_thread.join(timeout=5.0)
 
-        # Save debug data at end
-        if self.debug_data_collection is not None and len(self.debug_data_collection['executed_actions']) > 0:
-            self._save_debug_data()
-
         # Generate debug plots
         if self.config.debug_plotting:
             self._plot_debug_results()
             self._plot_action_chunks()
             self._plot_action_execution_timing()
-            print(f"\n{'='*60}")
-            print(f"Debug plots saved to: {self.config.debug_output_dir.absolute()}")
-            print(f"{'='*60}")
 
     def _plot_debug_results(self):
-        """Generate debug visualization plots."""
-        print("\nGenerating control loop timing histogram...")
+        """Generate control loop timing histogram."""
 
         loop_times = np.array(self.control_loop_times)
 
@@ -306,15 +221,12 @@ class ChunkingController(RobotController):
         plt.tight_layout()
         filename = self.config.debug_output_dir / "control_loop_timing.png"
         plt.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"Timing histogram saved to: {filename}")
         plt.close()
 
     def _plot_action_chunks(self):
         """Generate plots showing all predicted actions from each inference chunk."""
-        print("Generating action chunk plots...")
 
         if len(self.all_predicted_chunks) == 0:
-            print("No action chunks to plot")
             return
 
         n_inferences = len(self.all_predicted_chunks)
@@ -369,15 +281,12 @@ class ChunkingController(RobotController):
         plt.tight_layout()
         filename = self.config.debug_output_dir / "action_chunks.png"
         plt.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"Action chunks plot saved to: {filename}")
         plt.close()
 
     def _plot_action_execution_timing(self):
         """Generate plot showing execution time vs action index to identify delays."""
-        print("Generating action execution timing plot...")
 
         if len(self.control_loop_times) == 0:
-            print("No timing data to plot")
             return
 
         loop_times = np.array(self.control_loop_times)
@@ -455,163 +364,4 @@ class ChunkingController(RobotController):
         plt.tight_layout()
         filename = self.config.debug_output_dir / "action_execution_timing.png"
         plt.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"Action execution timing plot saved to: {filename}")
         plt.close()
-
-    def _save_debug_data(self):
-        """Save all collected debug data at end of execution."""
-        if self.debug_data_collection is None:
-            return
-
-        try:
-            # Create directory structure
-            debug_dir = Path('debug_data')
-            subdirs = {
-                'action_chunks': debug_dir / 'action_chunks',
-                'executed_actions': debug_dir / 'actions',
-                'eef_poses': debug_dir / 'eef_poses',
-                'point_clouds': debug_dir / 'pcd',
-                'robot0_eef_pos': debug_dir / 'robot0_eef_pos',
-                'actual_eef_pos': debug_dir / 'actual_eef_pos',
-                'pcd_timestamps': debug_dir / 'pcd_timestamps'
-            }
-
-            for subdir in subdirs.values():
-                subdir.mkdir(parents=True, exist_ok=True)
-
-            # Session timestamp for file naming
-            session_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-            # Save each data type
-            if len(self.debug_data_collection['action_chunks']) > 0:
-                self._save_timestamped_array_data(
-                    self.debug_data_collection['action_chunks'],
-                    subdirs['action_chunks'] / f'action_chunks_{session_ts}.npy'
-                )
-
-            if len(self.debug_data_collection['executed_actions']) > 0:
-                self._save_timestamped_array_data(
-                    self.debug_data_collection['executed_actions'],
-                    subdirs['executed_actions'] / f'executed_actions_{session_ts}.npy'
-                )
-
-            if len(self.debug_data_collection['eef_poses']) > 0:
-                self._save_eef_poses(
-                    self.debug_data_collection['eef_poses'],
-                    subdirs['eef_poses'] / f'eef_poses_{session_ts}.npy'
-                )
-
-            if len(self.debug_data_collection['point_clouds']) > 0:
-                self._save_point_clouds(
-                    self.debug_data_collection['point_clouds'],
-                    subdirs['point_clouds'],
-                    session_ts
-                )
-
-            if len(self.debug_data_collection['robot0_eef_pos']) > 0:
-                self._save_timestamped_array_data(
-                    self.debug_data_collection['robot0_eef_pos'],
-                    subdirs['robot0_eef_pos'] / f'robot0_eef_pos_{session_ts}.npy'
-                )
-
-            if len(self.debug_data_collection['actual_eef_pos']) > 0:
-                self._save_timestamped_array_data(
-                    self.debug_data_collection['actual_eef_pos'],
-                    subdirs['actual_eef_pos'] / f'actual_eef_pos_{session_ts}.npy'
-                )
-
-            if len(self.debug_data_collection['pcd_timestamps']) > 0:
-                self._save_timestamped_array_data(
-                    self.debug_data_collection['pcd_timestamps'],
-                    subdirs['pcd_timestamps'] / f'pcd_timestamps_{session_ts}.npy'
-                )
-
-            # Summary
-            print(f"\n{'='*60}")
-            print(f"Debug data saved: {debug_dir.absolute()}")
-            print(f"  Session: {session_ts}")
-            print(f"  Action chunks: {len(self.debug_data_collection['action_chunks'])} samples")
-            print(f"  Executed actions: {len(self.debug_data_collection['executed_actions'])} samples")
-            print(f"  EEF poses: {len(self.debug_data_collection['eef_poses'])} samples")
-            print(f"  Point clouds: {len(self.debug_data_collection['point_clouds'])} samples")
-            print(f"  Robot0 EEF pos: {len(self.debug_data_collection['robot0_eef_pos'])} samples")
-            print(f"  Actual EEF pos: {len(self.debug_data_collection['actual_eef_pos'])} samples")
-            print(f"  RGBD timestamps: {len(self.debug_data_collection['pcd_timestamps'])} samples")
-            print(f"{'='*60}\n")
-
-        except Exception as e:
-            print(f"WARNING: Failed to save debug data: {e}")
-            import traceback
-            traceback.print_exc()
-
-    def _save_timestamped_array_data(self, data_list, output_path):
-        """Save list of (timestamp_ms, array) tuples."""
-        if len(data_list) == 0:
-            return
-
-        timestamps = np.array([ts for ts, _ in data_list], dtype=np.int64)
-        arrays = np.array([arr for _, arr in data_list])
-
-        np.save(output_path, {
-            'timestamps_ms': timestamps,
-            'data': arrays
-        })
-
-    def _save_eef_poses(self, poses_list, output_path):
-        """Save end-effector poses with timestamps."""
-        if len(poses_list) == 0:
-            return
-
-        timestamps = np.array([ts for ts, _ in poses_list], dtype=np.int64)
-        positions = np.array([pose['position'] for _, pose in poses_list], dtype=np.float32)
-        quats = np.array([pose['orientation_quat'] for _, pose in poses_list], dtype=np.float32)
-        matrices = np.array([pose['orientation_matrix'] for _, pose in poses_list], dtype=np.float32)
-
-        np.save(output_path, {
-            'timestamps_ms': timestamps,
-            'positions': positions,
-            'orientations_quat': quats,
-            'orientations_matrix': matrices
-        })
-
-    def _save_point_clouds(self, pcd_list, output_dir, session_timestamp):
-        """Save point clouds with timestamps.
-
-        Saves all PCDs in single .npy file for easy batch loading.
-        """
-        if self.config.save_pcd_format == 'npy':
-            # Single file with all point clouds
-            timestamps = np.array([ts for ts, _ in pcd_list], dtype=np.int64)
-            point_clouds = [pcd for _, pcd in pcd_list]
-            point_counts = np.array([len(pcd) for pcd in point_clouds], dtype=np.int32)
-
-            output_path = output_dir / f'point_clouds_{session_timestamp}.npy'
-            np.save(output_path, {
-                'timestamps_ms': timestamps,
-                'point_clouds': point_clouds,
-                'point_counts': point_counts
-            }, allow_pickle=True)
-
-        elif self.config.save_pcd_format == 'ply':
-            # Individual PLY files
-            import open3d as o3d
-
-            timestamps = []
-            filenames = []
-
-            for timestamp_ms, pcd_array in pcd_list:
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(pcd_array[:, :3])
-                pcd.colors = o3d.utility.Vector3dVector(pcd_array[:, 3:6])
-
-                filename = f'pcd_{session_timestamp}_{timestamp_ms}.ply'
-                o3d.io.write_point_cloud(str(output_dir / filename), pcd)
-
-                timestamps.append(timestamp_ms)
-                filenames.append(filename)
-
-            # Save metadata
-            np.save(output_dir / f'metadata_{session_timestamp}.npy', {
-                'timestamps_ms': np.array(timestamps, dtype=np.int64),
-                'filenames': filenames
-            })

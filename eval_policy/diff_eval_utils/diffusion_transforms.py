@@ -8,12 +8,12 @@ from crisp_py.robot import Pose
 from PIL import Image
 
 try:
-    from .diffusion_constants import FINGER_HAND_OFFSET
+    from .diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET
 except ImportError:
-    from diffusion_constants import FINGER_HAND_OFFSET
+    from diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET
 
 
-def get_pose_from_robot(robot_pose: Pose, ret_orig=False) -> np.ndarray:
+def get_pose_from_robot(robot_pose: Pose, ret_orig=True) -> np.ndarray:
     """Convert robot pose to gripper pose with fingertip offset.
 
     Args:
@@ -30,6 +30,7 @@ def get_pose_from_robot(robot_pose: Pose, ret_orig=False) -> np.ndarray:
 
     gripper_offset = np.eye(4)
     gripper_offset[:3, 3] = np.array([0, 0, FINGER_HAND_OFFSET])
+    gripper_offset[:3, :3] = R.from_euler('XYZ', ROBOTIQ_ROTATION_OFFSET).as_matrix()
     if ret_orig:
         gripper_offset[:3, 3] = np.array([0, 0, 0])
 
@@ -138,7 +139,7 @@ def franka_obs_to_diff_obs(obs_buffer, img_policy=False, visualize=False):
     return obs
 
 
-def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat, ret_orig=False, clip=True):
+def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat, ret_orig=True, clip=True):
     """Convert action from fingertip frame to gripper frame.
 
     Args:
@@ -163,9 +164,10 @@ def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat, ret_orig=Fals
     finger_pose = np.eye(4)
     finger_pose[:3, :3] = rotmat[0]
     finger_pose[:3, 3] = action[:3]
-
+    # print(f"FINGER_HAND_OFFSET: {FINGER_HAND_OFFSET}")
     gripper_offset = np.eye(4)
     gripper_offset[:3, 3] = np.array([0, 0, -FINGER_HAND_OFFSET])
+    gripper_offset[:3, :3] = R.from_euler('XYZ', -1 * ROBOTIQ_ROTATION_OFFSET).as_matrix()
     if ret_orig:
         gripper_offset[:3, 3] = np.array([0, 0, 0])
 

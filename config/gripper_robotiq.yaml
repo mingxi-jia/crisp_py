@@ -1,0 +1,15 @@
+max_value: 1.0
+min_value: 0.0
+command_topic: "gripper/gripper_position_controller/commands"
+joint_state_topic: "gripper/joint_states"
+max_delta: 1.0
+# !!!! Fix Later, logic wrong
+# flip_value: true
+# Robotiq
+# 1 -> Close
+# 0 -> Open
+
+# Crispy
+# 1 -> Open
+# 0 -> Close
+

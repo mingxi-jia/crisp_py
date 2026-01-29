@@ -26,7 +26,7 @@ left_arm, gripper = setup_robot(config)
 homing_pose = left_arm.end_effector_pose.copy()
 
 hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2.hdf5"
-hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/test_nutella.hdf5"
+# hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/test_nutella.hdf5"
 
 # Gate the magenitude differences across frames
 dataset = h5py.File(hdf5_file_path, "r")

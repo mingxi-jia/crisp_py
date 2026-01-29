@@ -6,9 +6,13 @@ import numpy as np
 
 # Robot-specific constants
 FINGER_HAND_OFFSET = 0.06  # Distance from finger tip to gripper base along z-axis
+# FINGER_HAND_OFFSET = 0.08  # Distance from finger tip to gripper base along z-axis
+
 GRIPPER_NORM_CONST = 0.05  # Normalization constant for gripper value
 START_POSITION = np.array([0.55, 0., 0.25 + FINGER_HAND_OFFSET])
 
+ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, np.pi / 4])  # Rotation offset for Robotiq gripper
+ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, 0])  # Rotation offset for Robotiq gripper
 
 @dataclass
 class DPEvalConfig:
@@ -20,13 +24,7 @@ class DPEvalConfig:
 
     home_joint_position: np.ndarray = field(
         default_factory=lambda: np.array(
-            [-0.0018238854882693634, 0.11935392208236248, 0.00038266319676497025, -1.8032021275778523, 0.0038454665934960987, 1.9434627378430058, 0.7968990482289469]
-        )
-    )
-
-    home_joint_position: np.ndarray = field(
-        default_factory=lambda: np.array(
-            [0.0015795138042423453, 0.11460111156789562, 0.00012723805921852443, -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.7848162419679248]
+            [0.0015795138042423453, 0.11460111156789562, 0.00012723805921852443, -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.0]
         )
     )
 
@@ -45,9 +43,9 @@ class DPEvalConfig:
     n_steps: int = 20
 
     # Spacemouse action scale
-    spacemouse_action_scale: float = 0.015
+    spacemouse_action_scale: float = 0.04
     spacemouse_deadzone: float = 0.1
-    
+
     # Controller mode: 'simple', 'chunking', 'blending', 'intv'
     mode: str = 'simple'
 

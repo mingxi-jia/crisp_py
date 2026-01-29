@@ -35,6 +35,7 @@ class GripperConfig:
     publish_frequency: float = 30.0
     max_joint_delay: float = 1.0
     max_delta: float = 1.0
+    flip_value: bool = False
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "GripperConfig":
@@ -68,6 +69,7 @@ class GripperConfig:
                 "publish_frequency": config.get("publish_frequency", 30.0),
                 "max_delta": config.get("max_delta", 0.1),
                 "max_joint_delay": config.get("max_joint_delay", 1.0),
+                "flip_value": config.get("flip_value", False),
             }
         return cls(**config)
 
@@ -191,6 +193,7 @@ class Gripper:
 
     @property
     def value(self) -> float | None:
+        
         """Returns the current value of the gripper or None if not initialized."""
         if self._value is None:
             raise RuntimeError(
@@ -206,6 +209,9 @@ class Gripper:
         except ValueError:
             # Callback not found, which is expected if no data has been received yet
             pass
+        # if self.config.flip_value:
+        #     return np.clip(1.0 - self._normalize(self._value), 0.0, 1.0)
+        # else:
         return np.clip(self._normalize(self._value), 0.0, 1.0)
 
     @property
@@ -245,6 +251,8 @@ class Gripper:
         if self._target is None:
             return
         msg = Float64MultiArray()
+        # print(f"self.value: {self._value}, self._target: {self._target}")
+        # print(self._normalize(self._target) - self.value)
         msg.data = [
             self._unnormalize(
                 self.value
@@ -266,6 +274,8 @@ class Gripper:
             msg (JointState): the message containing the joint state.
         """
         self._value = msg.position[self._index]
+        if self.config.flip_value:
+            self._value = self.max_value - self._value
         self._torque = msg.effort[self._index]
 
     def set_target(self, target: float, *, epsilon: float = 0.1):

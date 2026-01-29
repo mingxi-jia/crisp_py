@@ -126,6 +126,8 @@ class TeleopController(RobotController):
         # Get spacemouse motion and button state
         motion = spacemouse.get_motion_state_transformed()
         dx, dy, dz, droll, dpitch, dyaw = motion * self.ACTION_SCALE
+        if dz > 0:
+            dz = dz * 1.5
         button_pressed = spacemouse.is_button_pressed(0)
 
         # Detect gripper toggle event
@@ -193,7 +195,7 @@ class TeleopController(RobotController):
             print(f"[GRIPPER] {'Closing' if new_gripper_value == 1.0 else 'Opening'} gripper...")
             self.gripper.set_target(1.0 - new_gripper_value)  # Invert for Franka convention
             self.gripper_rate.sleep()
-            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
+            # time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
             self.prev_grasp_value = new_gripper_value
 
         # Update button state for next iteration

@@ -7,7 +7,7 @@ from crisp_py.robot import Robot
 from crisp_py.robot_config import FrankaConfig
 
 robot_config = FrankaConfig(publish_frequency=100.0, target_joint_topic="target_joint")
-robot = Robot(namespace="right")
+robot = Robot()
 robot.wait_until_ready()
 
 # %%
