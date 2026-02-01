@@ -27,10 +27,17 @@ import pinocchio as pin
 import pink
 from pink import solve_ik
 from pink.tasks import FrameTask
+import sys
 
 import time
 
 from pink_realtime.util import load_robot_from_urdf
+from diff_eval_utils.diffusion_constants import DPEvalConfig
+
+config = DPEvalConfig
+toolbox_path = config.toolbox_path
+robot_filter_path = toolbox_path + "/robot_filter"
+sys.path.append(robot_filter_path)
 
 # Try to import robot_descriptions for fallback
 try:
@@ -48,12 +55,11 @@ end_effector_task = None
 END_EFFECTOR_FRAME = "fr3_hand_tcp"  # End effector frame name for local URDF
 
 
-# Home joint position from DPEvalConfig (valid for FR3 joint limits)
+# Home joint position for the 7 arm joints (reduced model)
 HOME_JOINT_POSITION = np.array([
     0.0015795138042423453, 0.11460111156789562, 0.00012723805921852443,
     -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.7848162419679248
 ])
-
 
 def init_robot(urdf_path: str = None, mesh_dirs: list = None, ee_frame: str = None):
     """Initialize the robot model and Pink configuration.
@@ -81,7 +87,16 @@ def init_robot(urdf_path: str = None, mesh_dirs: list = None, ee_frame: str = No
         robot = load_robot_description("fr3_mj_description")
         END_EFFECTOR_FRAME = ee_frame or "fr3_link7"
 
-    # Initialize configuration to home pose (q0 violates joint limits)
+    # Build reduced model: lock all joints with index > 7 (gripper joints)
+    joints_to_lock = [i for i in range(8, robot.model.njoints)]
+    if joints_to_lock:
+        q_ref = np.concatenate((HOME_JOINT_POSITION, np.zeros(robot.model.nq - 7)))
+        robot.model, [robot.visual_model, robot.collision_model] = pin.buildReducedModel(
+            robot.model, [robot.visual_model, robot.collision_model], joints_to_lock, q_ref)
+        robot.data = robot.model.createData()
+        print(f"Built reduced model: locked joints {joints_to_lock}, DOF: {robot.model.nq}")
+
+    # Initialize configuration to home pose
     config = pink.Configuration(robot.model, robot.data, HOME_JOINT_POSITION)
 
     # Create end-effector task
@@ -94,12 +109,28 @@ def init_robot(urdf_path: str = None, mesh_dirs: list = None, ee_frame: str = No
     print(f"Robot loaded. DOF: {robot.model.nq}")
     print(f"End effector frame: {END_EFFECTOR_FRAME}")
 
+    # List all joints with their indices and DOF info
+    print("\n" + "=" * 60)
+    print("JOINTS USED FOR IK OPTIMIZATION:")
+    print("=" * 60)
+    for i in range(1, robot.model.njoints):  # Skip universe joint (index 0)
+        joint = robot.model.joints[i]
+        joint_name = robot.model.names[i]
+        # Get joint limits
+        idx_q = joint.idx_q
+        nq = joint.nq
+        if nq > 0:
+            lower = robot.model.lowerPositionLimit[idx_q:idx_q+nq]
+            upper = robot.model.upperPositionLimit[idx_q:idx_q+nq]
+            print(f"  Joint {i}: {joint_name:30s} | idx_q={idx_q:2d} | nq={nq} | limits=[{lower[0]:.3f}, {upper[0]:.3f}]")
+        else:
+            print(f"  Joint {i}: {joint_name:30s} | idx_q={idx_q:2d} | nq={nq} (fixed)")
+    print("=" * 60)
+
     # List available frames
-    print("Available frames:")
+    print("\nAvailable frames:")
     for i, frame in enumerate(robot.model.frames):
         print(f"  {i}: {frame.name}")
-
-    print(f"Joint names: {[robot.model.names[i] for i in range(1, robot.model.njoints)]}")
 
 
 def solve_single_ik(position, orientation_quat, q_init=None, max_iters=1000, dt=0.001, tol=1e-6):
@@ -284,21 +315,25 @@ def main():
     parser = argparse.ArgumentParser(description='Pink IK Solver Server')
     parser.add_argument('--port', type=int, default=5002, help='Server port')
     parser.add_argument('--host', type=str, default='0.0.0.0', help='Server host')
-    parser.add_argument('--urdf', type=str, default=default_urdf,
-                        help='Path to URDF file (default: ./fr3_robot.urdf)')
-    parser.add_argument('--mesh-dirs', type=str, nargs='+', default=None,
-                        help='Directories to search for mesh packages')
-    parser.add_argument('--ee-frame', type=str, default=None,
-                        help='End effector frame name (default: fr3_hand_tcp for local URDF)')
     parser.add_argument('--use-robot-descriptions', action='store_true',
                         help='Use robot_descriptions package instead of local URDF')
     args = parser.parse_args()
 
+
+    ee_frame = "robotiq_tcp_link"
+
+    mesh_dirs = robot_filter_path
+    urdf_path = robot_filter_path + "/panda_description/urdf/panda_arm_robotiq.urdf"
+
+    ee_frame = 'fr3_hand_tcp'
+    mesh_dirs = None
+    urdf_path = default_urdf
+    
     # Initialize robot
     if args.use_robot_descriptions:
-        init_robot(urdf_path=None, ee_frame=args.ee_frame)
+        init_robot(urdf_path=urdf_path, ee_frame=ee_frame)
     else:
-        init_robot(urdf_path=args.urdf, mesh_dirs=args.mesh_dirs, ee_frame=args.ee_frame)
+        init_robot(urdf_path=urdf_path, mesh_dirs=mesh_dirs, ee_frame=ee_frame)
 
     print(f"\nStarting Pink IK server on {args.host}:{args.port}")
     print("Endpoints:")

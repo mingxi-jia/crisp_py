@@ -40,10 +40,11 @@ def initialize_policy(ckpt_path: str):
     workspace = cls(cfg)
     workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
-    policy = workspace.model
+    policy = workspace.ema_model
     import inspect
     print(inspect.getfile(policy.__class__))
-    device = torch.device('cuda')
+    device = torch.device('cuda:0')
+    print(device)
     policy.eval()
     policy.to(device)
     policy.num_inference_steps = 20

@@ -6,14 +6,47 @@ import torch
 from scipy.spatial.transform import Rotation as R
 from crisp_py.robot import Pose
 from PIL import Image
+import copy
+import sys
 
 try:
-    from .diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET
+    from .diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET, DPEvalConfig
 except ImportError:
-    from diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET
+    from diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET, DPEvalConfig
+
+# Add diffusion_policy to path and create module-level rotation transformer
+_config = DPEvalConfig
+if _config.diffusion_policy_path not in sys.path:
+    sys.path.append(_config.diffusion_policy_path)
+
+from diffusion_policy.model.common.rotation_transformer import RotationTransformer
+
+# Module-level rotation transformer singleton (rot6d <-> matrix)
+rot6d_to_mat = RotationTransformer('rotation_6d', 'matrix')
+mat_to_rot6d = RotationTransformer('matrix', 'rotation_6d')
 
 
-def get_pose_from_robot(robot_pose: Pose, ret_orig=True) -> np.ndarray:
+def eef_to_tip(robot_pose, xyz_offset, euler_offset) -> Pose: 
+    pose_out = copy.deepcopy(robot_pose)
+    
+    xyz = robot_pose.position
+    rotmat = robot_pose.orientation.as_matrix()
+    eef_pose = np.eye(4)
+    eef_pose[:3, :3] = rotmat
+    eef_pose[:3, 3] = xyz
+
+    gripper_offset = np.eye(4)
+    gripper_offset[:3, 3] = xyz_offset
+    gripper_offset[:3, :3] = R.from_euler('XYZ', euler_offset).as_matrix()
+
+    gripper_pose = eef_pose @ gripper_offset
+    gripper_xyz = gripper_pose[:3, 3]
+    pose_out.position = gripper_xyz
+    pose_out.orientation = R.from_matrix(gripper_pose[:3, :3])
+    return pose_out
+
+
+def get_pose_from_robot(robot_pose: Pose, ret_orig=False, ret_pose=False) -> np.ndarray:
     """Convert robot pose to gripper pose with fingertip offset.
 
     Args:
@@ -22,43 +55,19 @@ def get_pose_from_robot(robot_pose: Pose, ret_orig=True) -> np.ndarray:
     Returns:
         7-element array [x, y, z, qx, qy, qz, qw] representing gripper pose
     """
-    xyz = robot_pose.position
-    rotmat = robot_pose.orientation.as_matrix()
-    eef_pose = np.eye(4)
-    eef_pose[:3, :3] = rotmat
-    eef_pose[:3, 3] = xyz
-
-    gripper_offset = np.eye(4)
-    gripper_offset[:3, 3] = np.array([0, 0, FINGER_HAND_OFFSET])
-    gripper_offset[:3, :3] = R.from_euler('XYZ', ROBOTIQ_ROTATION_OFFSET).as_matrix()
     if ret_orig:
-        gripper_offset[:3, 3] = np.array([0, 0, 0])
+        xyz_offset = np.array([0, 0, 0])
+    else:
+        xyz_offset = np.array([0, 0, FINGER_HAND_OFFSET])
+    pose_out = eef_to_tip(robot_pose, xyz_offset, ROBOTIQ_ROTATION_OFFSET)
+    
+    if ret_pose: 
+        return pose_out
 
-
-    gripper_pose = eef_pose @ gripper_offset
-    gripper_xyz = gripper_pose[:3, 3]
-    gripper_orientation = R.from_matrix(gripper_pose[:3, :3]).as_quat()
+    gripper_xyz = pose_out.position
+    gripper_orientation = pose_out.orientation.as_quat()
     return np.concatenate([gripper_xyz, gripper_orientation], axis=0)
 
-def convert_pose_from_robot_to_fingertip(ee_poses: dict) -> dict:
-    corrected_hand_poss = []
-    for frame_idx, hand_pos in enumerate(ee_poses):
-        # Apply corrective rotation (calculated from first frame)
-        hand_mat = np.eye(4)
-        hand_mat[:3, :3] = R.from_quat(hand_pos[3:]).as_matrix()
-        hand_mat[:3, 3] = hand_pos[:3]
-
-        # Apply fixed translation offset from robot EE to hand fingertip
-        eTf = np.eye(4)
-        eTf[:3,3] = np.array([0.0, 0.0, 0.06])
-
-        corrected_hand_mat = hand_mat @ eTf
-        hand_pos[:3] = corrected_hand_mat[:3, 3]
-        hand_pos[3:] = R.from_matrix(corrected_hand_mat[:3,:3]).as_quat()
-        hand_pos[2] = np.clip(hand_pos[2], 0.0, None)  # prevent z from going below 0
-        corrected_hand_poss.append(hand_pos)
-         
-    return np.array(corrected_hand_poss)
 
 def process_rgb(rgb, target_size=84):
     """Crop, resize, and normalize an RGB image to (C, H, W) format."""
@@ -138,288 +147,74 @@ def franka_obs_to_diff_obs(obs_buffer, img_policy=False, visualize=False):
 
     return obs
 
+def ten_d_action_to_pose(action, clip=True):
+    """Convert 10D policy action to Pose and grasp value.
 
-def convert_action_from_fingertip_to_gripper(action, rot6d_to_mat, ret_orig=True, clip=True):
-    """Convert action from fingertip frame to gripper frame.
+    This should be called immediately after policy prediction to convert
+    the action from policy output format to Pose format.
 
     Args:
         action: 10-element action [x, y, z, rot6d(6), grasp(1)]
-        rot6d_to_mat: Rotation transformer for 6D rotation representation
+        clip: Whether to apply safety limits on position
 
     Returns:
-        Converted action in gripper frame
+        pose: Pose object with position and orientation (in fingertip frame)
+        grasp: Grasp value (0-1)
     """
-    if not action.flags.writeable:
-        action = action.copy()
 
+    # Extract components
+    position = action[:3].copy()
     rot6d = action[3:9]
-    rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))
+    grasp = float(action[9])
 
-    # Safety limits - clip Z to prevent collisions
+    # Safety limits - clip position to prevent collisions
     if clip:
-        action[0] = np.clip(action[0], 0.3, 0.8)
-        action[1] = np.clip(action[1], -0.35, 0.35)
-        action[2] = np.clip(action[2], 0, 0.61)
+        position[0] = np.clip(position[0], 0.3, 0.8)
+        position[1] = np.clip(position[1], -0.35, 0.35)
+        position[2] = np.clip(position[2], 0, 0.61)
 
+    # Convert rot6d to rotation matrix then to scipy Rotation
+    rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))[0]
+    orientation = R.from_matrix(rotmat)
+
+    # Create Pose object
+    pose = Pose(position=position, orientation=orientation)
+
+    return pose, grasp
+
+
+def convert_action_from_fingertip_to_gripper(pose: Pose, ret_orig=False):
+    """Convert pose from fingertip frame to gripper frame.
+
+    Args:
+        pose: Pose object in fingertip frame
+        ret_orig: If True, don't apply fingertip offset
+
+    Returns:
+        action: Position array [x, y, z] in gripper frame
+        gripper_rotation: scipy Rotation object for gripper orientation
+    """
+    # Get position and orientation from pose
+    position = pose.position
+    rotmat = pose.orientation.as_matrix()
+
+    # Build fingertip pose matrix
     finger_pose = np.eye(4)
-    finger_pose[:3, :3] = rotmat[0]
-    finger_pose[:3, 3] = action[:3]
-    # print(f"FINGER_HAND_OFFSET: {FINGER_HAND_OFFSET}")
-    gripper_offset = np.eye(4)
-    gripper_offset[:3, 3] = np.array([0, 0, -FINGER_HAND_OFFSET])
-    gripper_offset[:3, :3] = R.from_euler('XYZ', -1 * ROBOTIQ_ROTATION_OFFSET).as_matrix()
+    finger_pose[:3, :3] = rotmat
+    finger_pose[:3, 3] = position
+
+    # Apply offset (fingertip to gripper)
     if ret_orig:
-        gripper_offset[:3, 3] = np.array([0, 0, 0])
+        xyz_offset = np.array([0, 0, 0])
+    else:
+        xyz_offset = np.array([0, 0, -FINGER_HAND_OFFSET])
 
-    gripper_pose = finger_pose @ gripper_offset
-    gripper_xyz = gripper_pose[:3, 3]
-    gripper_rot6d = rot6d_to_mat.inverse(gripper_pose[:3, :3].reshape(1, 3, 3))[0]
-    grasp = action[-1:]
+    gripper_offset = np.eye(4)
+    gripper_offset[:3, 3] = xyz_offset
+    gripper_offset[:3, :3] = R.from_euler('XYZ', -1 * ROBOTIQ_ROTATION_OFFSET).as_matrix()
 
-    action_converted = np.concatenate([gripper_xyz, gripper_rot6d, grasp], axis=0)
-    gripper_rotation = R.from_matrix(gripper_pose[:3, :3])
-    return action_converted, gripper_rotation
+    gripper_pose_mat = finger_pose @ gripper_offset
+    gripper_position = gripper_pose_mat[:3, 3]
+    gripper_rotation = R.from_matrix(gripper_pose_mat[:3, :3])
 
-
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-
-    # Add parent directory to path for imports when running directly
-    script_dir = Path(__file__).resolve().parent
-    sys.path.insert(0, str(script_dir.parent))
-    sys.path.insert(0, str(script_dir))
-
-    from diffusion_constants import DPEvalConfig
-
-    example_data = {
-        "data_1": {
-            "eef_pos": np.array([0.5, 0.0, 0.4]),
-            "eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
-        },
-
-        "data_2": {
-            "eef_pos": np.array([-0.3, 0.2, 0.6]),
-            "eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
-        },
-
-        "data_3": {
-            "eef_pos": np.array([0.4, -0.2, 0.3]),
-            "eef_quat": np.array([0.0, 0.0, np.sin(np.pi/4), np.cos(np.pi/4)]),
-        },
-
-        "data_4": {
-            "eef_pos": np.array([0.6, 0.1, 0.5]),
-            "eef_quat": np.array([0.0, np.sin(np.pi/4), 0.0, np.cos(np.pi/4)]),
-        },
-
-        "data_5": {
-            "eef_pos": np.array([0.45, 0.05, 0.35]),
-            "eef_quat": np.array([np.sin(np.pi/4), 0.0, 0.0, np.cos(np.pi/4)]),
-        },
-
-        "data_6": {
-            "eef_pos": np.array([0.55, -0.15, 0.45]),
-            "eef_quat": np.array([
-                0.182574,  # x
-                0.365148,  # y
-                0.547723,  # z
-                0.730297,  # w
-            ]),  # already normalized
-        },
-
-        "data_7": {
-            "eef_pos": np.array([0.3, 0.0, 0.01]),
-            "eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
-        },
-
-        "data_8": {
-            "eef_pos": np.array([0.5, 0.2, 0.4]),
-            "eef_quat": np.array([1.0, 0.0, 0.0, 0.0]),
-        },
-
-        "data_9": {
-            "eef_pos": np.array([0.62, -0.08, 0.52]),
-            "eef_quat": np.array([0.12, -0.23, 0.41, 0.87]),
-        },
-
-        "data_10": {
-            "eef_pos": np.array([0.4, 0.1, -0.05]),
-            "eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
-        },
-    }
-
-    config = DPEvalConfig()
-    sys.path.append(config.diffusion_policy_path)
-    from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-
-    # Transformer for rot6d <-> matrix conversion (used by convert_action_from_fingertip_to_gripper)
-    # forward: rot6d -> matrix, inverse: matrix -> rot6d
-    rot6d_to_mat = RotationTransformer('rotation_6d', 'matrix')
-
-    # Transformer for matrix -> rot6d conversion (used for building actions)
-    mat_to_rot6d = RotationTransformer('matrix', 'rotation_6d')
-
-    ee_poses = np.stack([
-        np.concatenate([v["eef_pos"], v["eef_quat"]])
-        for v in example_data.values()
-    ], axis=0)
-
-    new_hand_poses = convert_pose_from_robot_to_fingertip(ee_poses)
-
-    # Build actions array - use full quaternion (not sliced)
-    # mat_to_rot6d.forward: matrix -> rot6d
-    actions = np.stack([
-        np.concatenate([
-            v["eef_pos"],
-            mat_to_rot6d.forward(
-                R.from_quat(v['eef_quat']).as_matrix().reshape(1, 3, 3).astype(np.float32)
-            )[0],
-            np.array([1.0])
-        ])
-        for v in example_data.values()
-    ], axis=0)
-
-    # Process each action individually since convert_action_from_fingertip_to_gripper expects single action
-    converted_positions = []
-    for action in actions:
-        action_converted, gripper_rotation = convert_action_from_fingertip_to_gripper(
-            action, rot6d_to_mat, ret_orig=False, clip=False
-        )
-        converted_positions.append(action_converted[:3])
-
-    converted_positions = np.array(converted_positions)
-
-    print("Converted action positions:")
-    print(converted_positions)
-    print("\nNew hand poses positions:")
-    print(new_hand_poses[:, :3])
-
-
-    actions_hand_poses = np.stack([
-        np.concatenate([
-            pos,
-            mat_to_rot6d.forward(
-                R.from_quat(quat).as_matrix().reshape(1, 3, 3).astype(np.float32)
-            )[0],
-            np.array([1.0])
-        ])
-        for pos, quat in zip(new_hand_poses[:, :3], new_hand_poses[:, 3:])
-    ], axis=0)
-
-    converted_actions = []
-    for action in actions_hand_poses:
-        action_converted, gripper_rotation = convert_action_from_fingertip_to_gripper(
-            action, rot6d_to_mat, ret_orig=False, clip=False
-        )
-        converted_actions.append(action_converted)
-
-    converted_actions = np.array(converted_actions)
-
-    for (action_done, action_raw) in zip(converted_actions, example_data.values()):
-        pos = action_done[:3]
-        # print(type(action[3:9]))
-        # print(action[3:9])
-        quat = R.from_matrix(
-            rot6d_to_mat.forward(action_done[3:9].reshape(1,6))[0]
-        ).as_quat()
-        print(f"Action:\n\t{pos}\n\t{quat}\n\t{action_raw['eef_pos']}\n\t{action_raw['eef_quat']}")
-
-    print("### Testing on preprocess + action conversion Done ###")
-
-    # ==========================================================================
-    # Test: get_pose_from_robot + convert_action_from_fingertip_to_gripper
-    # ==========================================================================
-    print("\n" + "="*70)
-    print("### Testing get_pose_from_robot + convert_action_from_fingertip_to_gripper ###")
-    print("="*70)
-
-    # Create a mock Pose class for testing (mimics crisp_py.robot.Pose)
-    class MockPose:
-        def __init__(self, position: np.ndarray, quat: np.ndarray):
-            self.position = position
-            self.orientation = R.from_quat(quat)
-
-    # Test with each example data point
-    for name, data in example_data.items():
-        # Create mock robot pose
-        robot_pose = MockPose(data["eef_pos"], data["eef_quat"])
-
-        # Step 1: get_pose_from_robot (robot EE -> fingertip, when ret_orig=False)
-        fingertip_pose = get_pose_from_robot(robot_pose, ret_orig=False)
-        fingertip_pos = fingertip_pose[:3]
-        fingertip_quat = fingertip_pose[3:]
-
-        # Step 2: Convert fingertip pose to action format (with rot6d)
-        fingertip_action = np.concatenate([
-            fingertip_pos,
-            mat_to_rot6d.forward(
-                R.from_quat(fingertip_quat).as_matrix().reshape(1, 3, 3).astype(np.float32)
-            )[0],
-            np.array([1.0])  # grasp value
-        ])
-
-        # Step 3: convert_action_from_fingertip_to_gripper (fingertip -> robot EE)
-        gripper_action, gripper_rotation = convert_action_from_fingertip_to_gripper(
-            fingertip_action, rot6d_to_mat, ret_orig=False, clip=False
-        )
-
-        # Extract recovered position and quaternion
-        recovered_pos = gripper_action[:3]
-        recovered_quat = R.from_matrix(
-            rot6d_to_mat.forward(gripper_action[3:9].reshape(1, 6))[0]
-        ).as_quat()
-
-        # Compare original vs recovered
-        pos_error = np.linalg.norm(data["eef_pos"] - recovered_pos)
-        # Handle quaternion sign ambiguity (q and -q represent same rotation)
-        quat_dot = np.abs(np.dot(data["eef_quat"], recovered_quat))
-        quat_error = 1.0 - quat_dot
-
-        print(f"\n{name}:")
-        print(f"  Original pos:  {data['eef_pos']}")
-        print(f"  Recovered pos: {recovered_pos}")
-        print(f"  Position error: {pos_error:.6f}")
-        print(f"  Original quat:  {data['eef_quat']}")
-        print(f"  Recovered quat: {recovered_quat}")
-        print(f"  Quaternion error: {quat_error:.6f}")
-
-        # Check if round-trip is successful (within tolerance)
-        if pos_error < 1e-5 and quat_error < 1e-5:
-            print(f"  Status: PASS")
-        else:
-            print(f"  Status: FAIL")
-
-    # Also test with ret_orig=False (no offset applied)
-    print("\n" + "-"*70)
-    print("Testing with ret_orig=False (no fingertip offset):")
-    print("-"*70)
-
-    for name, data in list(example_data.items())[:3]:  # Test first 3 only
-        robot_pose = MockPose(data["eef_pos"], data["eef_quat"])
-
-        # get_pose_from_robot with ret_orig=False (no offset)
-        pose_no_offset = get_pose_from_robot(robot_pose, ret_orig=False)
-
-        # convert_action_from_fingertip_to_gripper with ret_orig=False (no offset)
-        action_no_offset = np.concatenate([
-            pose_no_offset[:3],
-            mat_to_rot6d.forward(
-                R.from_quat(pose_no_offset[3:]).as_matrix().reshape(1, 3, 3).astype(np.float32)
-            )[0],
-            np.array([1.0])
-        ])
-        recovered_action, _ = convert_action_from_fingertip_to_gripper(
-            action_no_offset, rot6d_to_mat, ret_orig=False, clip=False
-        )
-
-        recovered_pos = recovered_action[:3]
-        pos_error = np.linalg.norm(data["eef_pos"] - recovered_pos)
-
-        print(f"\n{name}:")
-        print(f"  Original pos:  {data['eef_pos']}")
-        print(f"  Recovered pos: {recovered_pos}")
-        print(f"  Position error: {pos_error:.6f}")
-        print(f"  Status: {'PASS' if pos_error < 1e-5 else 'FAIL'}")
-
-    print("\n### Testing get_pose_from_robot + convert_action_from_fingertip_to_gripper Done ###")
+    return gripper_position, gripper_rotation

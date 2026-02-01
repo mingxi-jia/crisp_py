@@ -23,25 +23,21 @@ import open3d as o3d
 # Add external dependencies
 sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
 
-from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-
 # Import policy client
 from diff_eval_utils.diffusion_clients import PolicyClient
-from diff_eval_utils.diffusion_transforms import convert_action_from_fingertip_to_gripper
+from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_action_from_fingertip_to_gripper
 
 
 class PolicyTrajectoryVisualizer:
     """Visualizes predicted policy trajectories in 3D."""
 
-    def __init__(self, policy_client, rotation_transformer, hand=False):
+    def __init__(self, policy_client, hand=False):
         """Initialize the visualizer.
 
         Args:
             policy_client: PolicyClient instance
-            rotation_transformer: RotationTransformer for 6D rotations
         """
         self.policy_client = policy_client
-        self.rotation_transformer = rotation_transformer
         self.hand = hand
 
     def predict_trajectory(self, observation):
@@ -68,12 +64,8 @@ class PolicyTrajectoryVisualizer:
         trajectory = []
         for action in actions:
             # Convert from fingertip to gripper frame
-            action_converted, gripper_rotation = convert_action_from_fingertip_to_gripper(
-                action, self.rotation_transformer
-            )
-
-            # Extract position (first 3 elements)
-            position = action_converted[:3]
+            pose, grasp = ten_d_action_to_pose(action)
+            position, gripper_rotation = convert_action_from_fingertip_to_gripper(pose)
 
             # Use the gripper rotation from the conversion
             orientation_quat = gripper_rotation.as_quat()  # (x, y, z, w)
@@ -380,14 +372,9 @@ def main():
     policy_client = PolicyClient(f"http://localhost:{args.policy_port}")
     time.sleep(1.0)  # Wait for connection
 
-    # Initialize rotation transformer (needed for action conversion)
-    rotation_transformer = RotationTransformer(from_rep=args.rotation_repr,
-                                              to_rep='matrix')
-
     # Create visualizer
     visualizer = PolicyTrajectoryVisualizer(
         policy_client=policy_client,
-        rotation_transformer=rotation_transformer,
         hand=args.hand
     )
 

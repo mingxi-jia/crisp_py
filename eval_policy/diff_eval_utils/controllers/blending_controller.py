@@ -1,4 +1,5 @@
 from diff_eval_utils.controllers.chunking_controller import ChunkingController
+from diff_eval_utils.diffusion_transforms import rot6d_to_mat
 import time
 import numpy as np
 import threading
@@ -79,44 +80,7 @@ class BlendingChunkingController(ChunkingController):
                             (self.inference_count, [a.copy() for a in self.action_queue])
                         )
 
-                    # Debug data collection
-                    if self.debug_data_collection is not None:
-                        timestamp_ms = int(inference_time * 1000)
-
-                        # Save action chunk
-                        self.debug_data_collection['action_chunks'].append(
-                            (timestamp_ms, actions.copy())
-                        )
-
-                        # Save point cloud
-                        pcd = obs_dict.get('pcd', None)
-                        if pcd is not None:
-                            self.debug_data_collection['point_clouds'].append(
-                                (timestamp_ms, pcd.copy())
-                            )
-
-                        # Save robot0_eef_pos
-                        robot0_eef_pos = obs_dict.get('robot0_eef_pos', None)
-                        if robot0_eef_pos is not None:
-                            self.debug_data_collection['robot0_eef_pos'].append(
-                                (timestamp_ms, robot0_eef_pos.copy())
-                            )
-
-                        # Save RGBD timestamp
-                        pcd_timestamp = obs_dict.get('pcd_timestamp', None)
-                        if pcd_timestamp is not None:
-                            # Ensure we create an independent copy (not a reference)
-                            if isinstance(pcd_timestamp, np.ndarray):
-                                ts_copy = pcd_timestamp.copy()
-                            else:
-                                ts_copy = np.array(pcd_timestamp).copy()
-                            print(f"Saving RGBD timestamp: {ts_copy}")
-                            self.debug_data_collection['pcd_timestamps'].append(
-                                (timestamp_ms, ts_copy)
-                            )
-
                     self.last_inference_time = time.time()
-                    print(f"Inference took {(self.last_inference_time - current_time)*1000:.1f} ms")
                     self.inference_count += 1
 
             finally:
@@ -199,18 +163,11 @@ class BlendingChunkingController(ChunkingController):
             self.live_plot_fig = None
             self.live_plot_ax = None
 
-        # Save debug data at end
-        if self.debug_data_collection is not None and len(self.debug_data_collection['executed_actions']) > 0:
-            self._save_debug_data()
-
         # Generate debug plots
         if self.config.debug_plotting:
             self._plot_debug_results()
             self._plot_action_chunks()
             self._plot_action_execution_timing()
-            print(f"\n{'='*60}")
-            print(f"Debug plots saved to: {self.config.debug_output_dir.absolute()}")
-            print(f"{'='*60}")
 
     def _plot_debug_results(self):
         """Generate debug plots showing action blending."""
@@ -253,7 +210,7 @@ class BlendingChunkingController(ChunkingController):
                         value = action[2]
                     else:  # Yaw
                         rot6d = action[3:9]
-                        rotmat = self.rotation_transformer.forward(rot6d.reshape(1, 6))[0]
+                        rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))[0]
                         value = np.arctan2(rotmat[1, 0], rotmat[0, 0])
 
                     x_vals.append(n_step)

@@ -72,6 +72,13 @@ class PointCloudManager(Node):
         )
         self.sync.registerCallback(self.sync_callback)
 
+        # Frequency monitoring
+        self._freq_monitor_start_time = time.time()
+        self._freq_monitor_count = 0
+        self._freq_monitor_last_log_time = time.time()
+        self._freq_monitor_interval = 5.0  # Log every 5 seconds
+        self._freq_monitor_enabled = True
+
         self.get_logger().info("PointCloudManager initialized")
 
     def rgbd_to_pointcloud(self, rgb, depth, cam_params):
@@ -190,10 +197,16 @@ class PointCloudManager(Node):
         else:
             while self.rgb_images == [] or self.depth_images == []:
                 time.sleep(0.01)  # Wait for first callback
-                print("No RGB image received yet.")
+                # print("No RGB image received yet.")
             name2idx = {"cam1": 0, "cam2": 1, "cam3": 2}
             return self.rgb_images[name2idx[cam_name]], self.depth_images[name2idx[cam_name]]
 
+    def clear_cache(self):
+        """Clear stored images to free memory."""
+        self.rgb_images = []
+        self.depth_images = []
+        self.inhand_image = None
+        self.inhand_depth = None
 # %%
 def main():
     """Test the PointCloudManager."""
@@ -227,7 +240,7 @@ def main():
         check_count += 1
 
         # Track rate when new point cloud arrives
-        if pcd is not None and pcd != last_pcd:
+        if pcd is not None:
             current_time = time.time()
             if last_update_time is not None:
                 dt = current_time - last_update_time
@@ -239,10 +252,11 @@ def main():
                 if len(update_times) % 15 == 0:
                     avg_dt = np.mean(update_times[-30:])  # Use last 30 samples
                     rate = 1.0 / avg_dt if avg_dt > 0 else 0
-                    print(f"Rate: {rate:.2f} Hz | Points: {len(pcd.points)} | Updates: {len(update_times)}")
-
+                    print(f"Rate: {rate:.2f} Hz | Points: {len(pcd)} | Updates: {len(update_times)}")
+        
             last_update_time = current_time
             last_pcd = pcd
+        manager.clear_cache()
 
     # Final stats
     if update_times:

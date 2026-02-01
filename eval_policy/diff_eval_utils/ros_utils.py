@@ -16,31 +16,63 @@ class JointStateSubscriber:
             topic: Topic name to subscribe to.
         """
         self._node = node
-        self._received = False
-        self.joint_array = None
+        self._franka_received = False
+        self._robotiq_received = False
+        self.franak_joint_array = None
+        self.gripper_joint_array = None
+        self.gripper_width = 0.7894070484581498
+        self.franka_joint_names = ["fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"]
+        self.gripper_joint_names = ['gripper_joint']
 
         self._subscription = node.create_subscription(
             JointState,
             topic,
-            self._callback,
+            self._franka_callback,
+            10
+        )
+        self._robotiq_subscription = node.create_subscription(
+            JointState,
+            "/gripper/gripper_state",
+            self._robotiq_callback,
             10
         )
 
-    def _callback(self, msg: JointState):
+    def _franka_callback(self, msg: JointState):
         """Update joint positions from the message."""
         joint_names = msg.name
         joint_positions = msg.position
-        sorted_indices = sorted(range(len(joint_names)), key=lambda i: joint_names[i])
-        sorted_positions = [joint_positions[i] for i in sorted_indices]
-        self.joint_array = np.array(sorted_positions, dtype=np.float32)
-        self._received = True
+        # print(joint_names)
+        joint_array = []
+        for i, j in enumerate(joint_names):
+            if j in self.franka_joint_names:
+                joint_array.append(joint_positions[i])
+
+        self.franak_joint_array = np.array(joint_array, dtype=np.float32)
+        self._franka_received = True
+
+    def _robotiq_callback(self, msg: JointState):
+        """Update joint positions from the message."""
+        joint_names = msg.name
+        joint_positions = msg.position
+        gripper_state = []
+        for i, j in enumerate(joint_names):
+            if j in self.gripper_joint_names:
+                gripper_state.append(joint_positions[i])
+
+        self.gripper_joint_array = np.array(gripper_state, dtype=np.float32)
+        self._robotiq_received = True
 
     @property
     def joint_values(self) -> np.ndarray:
         """Get joint values, skipping world joint (first element) for Franka."""
-        return self.joint_array
+        return self.franak_joint_array
+    
+    @property
+    def gripper_state(self) -> np.ndarray:
+        """Get joint values, skipping world joint (first element) for Franka."""
+        return np.round(self.gripper_joint_array)
 
     @property
     def is_ready(self) -> bool:
         """Check if at least one message has been received."""
-        return self._received
+        return self._franka_received and self._robotiq_received

@@ -3,8 +3,10 @@
 This script:
 1. Loads trajectory from HDF5 (same as test_pink.py)
 2. Solves IK using Pink with local fr3_robot.urdf
-3. Visualizes the robot trajectory in meshcat (browser-based)
-4. Optionally plots IK error (ground truth vs solved) over time
+3. Optionally applies low pass filter to smooth the trajectory
+4. Visualizes the robot trajectory in meshcat (browser-based)
+5. Optionally plots IK error (ground truth vs solved) over time
+6. Optionally plots trajectory comparison (ground truth vs IK solved)
 
 Run in pink_solver environment:
     conda activate pink_solver
@@ -13,8 +15,20 @@ Run in pink_solver environment:
     # With IK error plot:
     python test_pink_sim_2.py --plot-error
 
-    # Skip meshcat visualization, only show error plot:
-    python test_pink_sim_2.py --plot-error --no-viz
+    # With trajectory comparison plot (recommended for accuracy analysis):
+    python test_pink_sim_2.py --plot-comparison
+
+    # Both plots:
+    python test_pink_sim_2.py --plot-error --plot-comparison
+
+    # Skip meshcat visualization, only show plots:
+    python test_pink_sim_2.py --plot-comparison --no-viz
+
+    # Apply low pass filter to smooth trajectory:
+    python test_pink_sim_2.py --lowpass
+
+    # Customize low pass filter (cutoff freq in Hz, filter order):
+    python test_pink_sim_2.py --lowpass --lowpass-cutoff 1.5 --lowpass-order 3
 
 Opens visualization at: http://127.0.0.1:7000/static/
 """
@@ -25,8 +39,18 @@ import argparse
 import numpy as np
 import h5py
 import matplotlib.pyplot as plt
+import sys
+from scipy.signal import butter, filtfilt
+
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
 from scipy.spatial.transform import Rotation as R
+from diff_eval_utils.diffusion_constants import DPEvalConfig
+
+config = DPEvalConfig
+toolbox_path = config.toolbox_path
+robot_filter_path = toolbox_path + "/robot_filter"
+sys.path.append(robot_filter_path)
 
 import pinocchio as pin
 import pink
@@ -44,10 +68,10 @@ except ImportError:
     print("WARNING: MeshcatVisualizer not available. Install with: pip install meshcat")
 
 # Configuration
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-URDF_PATH = os.path.join(SCRIPT_DIR, "fr3_robot.urdf")
-HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2.hdf5"
-END_EFFECTOR_FRAME = "fr3_hand_tcp"  # End effector frame from local URDF
+SCRIPT_DIR = robot_filter_path + "/panda_description/urdf"
+URDF_PATH = os.path.join(SCRIPT_DIR, "panda_arm_robotiq.urdf")
+HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2_smoothed.hdf5"
+END_EFFECTOR_FRAME = "robotiq_tcp_link"  # End effector frame from local URDF
 CTRL_FREQ = 10.0  # Hz
 
 # Fingertip to gripper offset
@@ -56,7 +80,7 @@ FINGER_HAND_OFFSET = 0.20
 # Home joint position from DPEvalConfig (valid for FR3 joint limits)
 HOME_JOINT_POSITION = np.array([
     0.0015795138042423453, 0.11460111156789562, 0.00012723805921852443,
-    -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.7848162419679248
+    -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.7848162419679248, 0, 0, 0, 0, 0, 0
 ])
 
 
@@ -136,6 +160,50 @@ def interpolate_trajectory(trajectory, num_interp=5):
     interpolated.append(np.array(trajectory[-1]))
 
     return interpolated
+
+
+def lowpass_filter_trajectory(trajectory, cutoff_freq, sample_freq, order=2):
+    """Apply a Butterworth low pass filter to the trajectory.
+
+    Args:
+        trajectory: List of joint configurations (numpy arrays)
+        cutoff_freq: Cutoff frequency in Hz (frequencies above this are attenuated)
+        sample_freq: Sampling frequency of the trajectory in Hz
+        order: Order of the Butterworth filter (default: 2)
+
+    Returns:
+        Filtered trajectory as list of numpy arrays
+    """
+    if len(trajectory) < 4:
+        print("Warning: Trajectory too short for filtering, returning original")
+        return trajectory
+
+    # Convert to numpy array for easier processing
+    traj_array = np.array(trajectory)  # Shape: (n_frames, n_joints)
+    n_frames, n_joints = traj_array.shape
+
+    # Normalize cutoff frequency (Nyquist frequency = sample_freq / 2)
+    nyquist = sample_freq / 2.0
+    if cutoff_freq >= nyquist:
+        print(f"Warning: Cutoff freq ({cutoff_freq} Hz) >= Nyquist freq ({nyquist} Hz). "
+              f"Reducing to {nyquist * 0.9:.2f} Hz")
+        cutoff_freq = nyquist * 0.9
+
+    normalized_cutoff = cutoff_freq / nyquist
+
+    # Design Butterworth low pass filter
+    b, a = butter(order, normalized_cutoff, btype='low', analog=False)
+
+    # Apply filter to each joint dimension
+    filtered_array = np.zeros_like(traj_array)
+    for j in range(n_joints):
+        # Use filtfilt for zero-phase filtering (no phase delay)
+        filtered_array[:, j] = filtfilt(b, a, traj_array[:, j])
+
+    # Convert back to list of arrays
+    filtered_trajectory = [filtered_array[i, :] for i in range(n_frames)]
+
+    return filtered_trajectory
 
 
 def solve_trajectory_ik(robot, gripper_poses, q_init):
@@ -218,6 +286,146 @@ def solve_trajectory_ik(robot, gripper_poses, q_init):
     print("IK solving complete.")
 
     return trajectory, solved_poses
+
+
+def plot_trajectory_comparison(gripper_poses, solved_poses, dt):
+    """Plot ground truth vs solved trajectories for visual comparison.
+
+    Args:
+        gripper_poses: List of (position, quaternion) tuples - ground truth targets
+        solved_poses: List of (position, quaternion) tuples - solved IK results
+        dt: Time step between poses
+    """
+    n_poses = len(gripper_poses)
+    times = np.arange(n_poses) * dt
+
+    # Extract positions
+    target_positions = np.array([p[0] for p in gripper_poses])
+    solved_positions = np.array([p[0] for p in solved_poses])
+
+    # Extract orientations (convert to Euler for visualization)
+    target_eulers = np.array([R.from_quat(p[1]).as_euler('xyz', degrees=True) for p in gripper_poses])
+    solved_eulers = np.array([R.from_quat(p[1]).as_euler('xyz', degrees=True) for p in solved_poses])
+
+    # Create figure with 3 rows: XYZ position, RPY orientation, 3D trajectory
+    fig = plt.figure(figsize=(16, 14))
+
+    # ============ Row 1: Position comparison (3 subplots for X, Y, Z) ============
+    ax_x = fig.add_subplot(3, 3, 1)
+    ax_x.plot(times, target_positions[:, 0], 'b-', label='Ground Truth', linewidth=1.5)
+    ax_x.plot(times, solved_positions[:, 0], 'r--', label='IK Solved', linewidth=1.5, alpha=0.8)
+    ax_x.set_ylabel('X Position [m]')
+    ax_x.set_title('X Position Comparison')
+    ax_x.legend(loc='upper right')
+    ax_x.grid(True, alpha=0.3)
+
+    ax_y = fig.add_subplot(3, 3, 2)
+    ax_y.plot(times, target_positions[:, 1], 'b-', label='Ground Truth', linewidth=1.5)
+    ax_y.plot(times, solved_positions[:, 1], 'r--', label='IK Solved', linewidth=1.5, alpha=0.8)
+    ax_y.set_ylabel('Y Position [m]')
+    ax_y.set_title('Y Position Comparison')
+    ax_y.legend(loc='upper right')
+    ax_y.grid(True, alpha=0.3)
+
+    ax_z = fig.add_subplot(3, 3, 3)
+    ax_z.plot(times, target_positions[:, 2], 'b-', label='Ground Truth', linewidth=1.5)
+    ax_z.plot(times, solved_positions[:, 2], 'r--', label='IK Solved', linewidth=1.5, alpha=0.8)
+    ax_z.set_ylabel('Z Position [m]')
+    ax_z.set_title('Z Position Comparison')
+    ax_z.legend(loc='upper right')
+    ax_z.grid(True, alpha=0.3)
+
+    # ============ Row 2: Orientation comparison (3 subplots for Roll, Pitch, Yaw) ============
+    ax_roll = fig.add_subplot(3, 3, 4)
+    ax_roll.plot(times, target_eulers[:, 0], 'b-', label='Ground Truth', linewidth=1.5)
+    ax_roll.plot(times, solved_eulers[:, 0], 'r--', label='IK Solved', linewidth=1.5, alpha=0.8)
+    ax_roll.set_xlabel('Time [s]')
+    ax_roll.set_ylabel('Roll [deg]')
+    ax_roll.set_title('Roll Comparison')
+    ax_roll.legend(loc='upper right')
+    ax_roll.grid(True, alpha=0.3)
+
+    ax_pitch = fig.add_subplot(3, 3, 5)
+    ax_pitch.plot(times, target_eulers[:, 1], 'b-', label='Ground Truth', linewidth=1.5)
+    ax_pitch.plot(times, solved_eulers[:, 1], 'r--', label='IK Solved', linewidth=1.5, alpha=0.8)
+    ax_pitch.set_xlabel('Time [s]')
+    ax_pitch.set_ylabel('Pitch [deg]')
+    ax_pitch.set_title('Pitch Comparison')
+    ax_pitch.legend(loc='upper right')
+    ax_pitch.grid(True, alpha=0.3)
+
+    ax_yaw = fig.add_subplot(3, 3, 6)
+    ax_yaw.plot(times, target_eulers[:, 2], 'b-', label='Ground Truth', linewidth=1.5)
+    ax_yaw.plot(times, solved_eulers[:, 2], 'r--', label='IK Solved', linewidth=1.5, alpha=0.8)
+    ax_yaw.set_xlabel('Time [s]')
+    ax_yaw.set_ylabel('Yaw [deg]')
+    ax_yaw.set_title('Yaw Comparison')
+    ax_yaw.legend(loc='upper right')
+    ax_yaw.grid(True, alpha=0.3)
+
+    # ============ Row 3: 3D trajectory visualization ============
+    ax_3d = fig.add_subplot(3, 3, 7, projection='3d')
+    ax_3d.plot(target_positions[:, 0], target_positions[:, 1], target_positions[:, 2],
+               'b-', label='Ground Truth', linewidth=2)
+    ax_3d.plot(solved_positions[:, 0], solved_positions[:, 1], solved_positions[:, 2],
+               'r--', label='IK Solved', linewidth=2, alpha=0.8)
+    # Mark start and end points
+    ax_3d.scatter(*target_positions[0], c='green', s=100, marker='o', label='Start')
+    ax_3d.scatter(*target_positions[-1], c='purple', s=100, marker='s', label='End')
+    ax_3d.set_xlabel('X [m]')
+    ax_3d.set_ylabel('Y [m]')
+    ax_3d.set_zlabel('Z [m]')
+    ax_3d.set_title('3D Trajectory Comparison')
+    ax_3d.legend(loc='upper right')
+
+    # ============ Row 3: Position error magnitude over time ============
+    pos_errors = np.linalg.norm(solved_positions - target_positions, axis=1) * 1000  # in mm
+    ax_pos_err = fig.add_subplot(3, 3, 8)
+    ax_pos_err.plot(times, pos_errors, 'k-', linewidth=1.5)
+    ax_pos_err.fill_between(times, 0, pos_errors, alpha=0.3)
+    ax_pos_err.set_xlabel('Time [s]')
+    ax_pos_err.set_ylabel('Position Error [mm]')
+    ax_pos_err.set_title(f'Position Error Magnitude (Mean: {np.mean(pos_errors):.3f} mm, Max: {np.max(pos_errors):.3f} mm)')
+    ax_pos_err.grid(True, alpha=0.3)
+
+    # ============ Row 3: Orientation error magnitude over time ============
+    orient_errors = []
+    for i in range(n_poses):
+        target_rot = R.from_quat(gripper_poses[i][1])
+        solved_rot = R.from_quat(solved_poses[i][1])
+        # Compute relative rotation and get angle
+        rel_rot = target_rot.inv() * solved_rot
+        angle = np.abs(rel_rot.magnitude()) * 180 / np.pi  # in degrees
+        orient_errors.append(angle)
+    orient_errors = np.array(orient_errors)
+
+    ax_orient_err = fig.add_subplot(3, 3, 9)
+    ax_orient_err.plot(times, orient_errors, 'k-', linewidth=1.5)
+    ax_orient_err.fill_between(times, 0, orient_errors, alpha=0.3)
+    ax_orient_err.set_xlabel('Time [s]')
+    ax_orient_err.set_ylabel('Orientation Error [deg]')
+    ax_orient_err.set_title(f'Orientation Error Magnitude (Mean: {np.mean(orient_errors):.4f}°, Max: {np.max(orient_errors):.4f}°)')
+    ax_orient_err.grid(True, alpha=0.3)
+
+    fig.suptitle('Ground Truth vs Pink IK Solved Trajectory Comparison', fontsize=14, fontweight='bold')
+    fig.tight_layout()
+
+    # Print accuracy summary
+    print("\n" + "=" * 60)
+    print("TRAJECTORY COMPARISON SUMMARY")
+    print("=" * 60)
+    print(f"Number of poses: {n_poses}")
+    print(f"Duration: {times[-1]:.2f} s")
+    print(f"\nPosition Accuracy:")
+    print(f"  Mean error: {np.mean(pos_errors):.4f} mm")
+    print(f"  Max error:  {np.max(pos_errors):.4f} mm")
+    print(f"  Std dev:    {np.std(pos_errors):.4f} mm")
+    print(f"\nOrientation Accuracy:")
+    print(f"  Mean error: {np.mean(orient_errors):.6f} deg")
+    print(f"  Max error:  {np.max(orient_errors):.6f} deg")
+    print(f"  Std dev:    {np.std(orient_errors):.6f} deg")
+
+    plt.show()
 
 
 def plot_ik_error(gripper_poses, solved_poses, dt):
@@ -393,13 +601,21 @@ def main():
     parser.add_argument('--urdf', type=str, default=URDF_PATH, help='URDF file path')
     parser.add_argument('--hdf5', type=str, default=HDF5_FILE, help='HDF5 file path')
     parser.add_argument('--freq', type=float, default=CTRL_FREQ, help='Control frequency (Hz)')
-    parser.add_argument('--interp', type=int, default=0,
+    parser.add_argument('--interp', type=int, default=5,
                         help='Number of frames to interpolate between waypoints (0=no interpolation)')
     parser.add_argument('--no-viz', action='store_true', help='Skip visualization, just solve IK')
     parser.add_argument('--plot-error', action='store_true',
                         help='Plot IK error (difference between target and solved poses)')
-    parser.add_argument('--mesh-dirs', type=str, nargs='+', default=None,
+    parser.add_argument('--plot-comparison', action='store_true',
+                        help='Plot trajectory comparison (ground truth vs IK solved)')
+    parser.add_argument('--mesh-dirs', type=str, nargs='+', default=robot_filter_path,
                         help='Additional directories to search for mesh packages')
+    parser.add_argument('--lowpass', action='store_true',
+                        help='Apply low pass filter to smooth the trajectory')
+    parser.add_argument('--lowpass-cutoff', type=float, default=2.0,
+                        help='Low pass filter cutoff frequency in Hz (default: 2.0)')
+    parser.add_argument('--lowpass-order', type=int, default=2,
+                        help='Low pass filter order (default: 2)')
     args = parser.parse_args()
 
     dt = 1.0 / args.freq
@@ -430,6 +646,22 @@ def main():
     # Solve IK using home joint position as initial config
     print(f"\nSolving IK (initial config from DPEvalConfig)...")
     trajectory, solved_poses = solve_trajectory_ik(robot, gripper_poses, HOME_JOINT_POSITION)
+
+    # Apply low pass filter if requested
+    if args.lowpass:
+        print(f"\nApplying low pass filter (cutoff: {args.lowpass_cutoff} Hz, order: {args.lowpass_order})...")
+        trajectory = lowpass_filter_trajectory(
+            trajectory,
+            cutoff_freq=args.lowpass_cutoff,
+            sample_freq=args.freq,
+            order=args.lowpass_order
+        )
+        print("Low pass filtering complete.")
+
+    # Plot trajectory comparison if requested
+    if args.plot_comparison:
+        print("\nPlotting trajectory comparison...")
+        plot_trajectory_comparison(gripper_poses, solved_poses, dt)
 
     # Plot IK error if requested
     if args.plot_error:

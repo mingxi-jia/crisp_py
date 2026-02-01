@@ -108,6 +108,8 @@ CKPT_PATH="${1:-/media/mingxi/T7/nutella_dp_2d/episodes/data/outputs/2026.01.29/
 
 CKPT_PATH="${1:-/media/mingxi/T7/nutella_dp_2d/data/outputs/2026.01.29/02.39.14_train_diffusion_unet_image_nutella_realworld_3/checkpoints/epoch=0140-train_action_mse_error=0.001.ckpt}"
 
+CKPT_PATH="${1:-/media/mingxi/T7/XEMB_Experiment/nutella_sort/epoch=0220-train_action_mse_error=0.001.ckpt}"
+
 LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
 
 CLASSIFIER_CKPT_PATH="${2:-/home/mingxi/mingxi_ws/crisp/crisp_py/eval_policy/best_intervention_classifier_left_side.pth}"

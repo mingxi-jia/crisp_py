@@ -5,14 +5,15 @@ from pathlib import Path
 import numpy as np
 
 # Robot-specific constants
-FINGER_HAND_OFFSET = 0.06  # Distance from finger tip to gripper base along z-axis
+FINGER_HAND_OFFSET = 0.10  # Distance from finger tip to gripper base along z-axis
 # FINGER_HAND_OFFSET = 0.08  # Distance from finger tip to gripper base along z-axis
 
 GRIPPER_NORM_CONST = 0.05  # Normalization constant for gripper value
 START_POSITION = np.array([0.55, 0., 0.25 + FINGER_HAND_OFFSET])
 
 ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, np.pi / 4])  # Rotation offset for Robotiq gripper
-ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, 0])  # Rotation offset for Robotiq gripper
+# ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, 0])  # Rotation offset for Robotiq gripper
+
 
 @dataclass
 class DPEvalConfig:
@@ -21,6 +22,7 @@ class DPEvalConfig:
     # Server configuration
     policy_server_port: int = 5000
     pcd_server_port: int = 5001
+    ik_server_port: int = 5002
 
     home_joint_position: np.ndarray = field(
         default_factory=lambda: np.array(
@@ -39,15 +41,23 @@ class DPEvalConfig:
     joint_delta_threshold: float = 0.2  # Max allowed deviation from home pose (rad)
 
     # Control parameters
-    ctrl_freq: float = 10
+    ctrl_freq: float = 7
+    n_interpolation: int = 5
+    joint_ctrl_freq: float = 24
+
     n_steps: int = 20
 
+    teleop: dict = field(default_factory=lambda: {"n_interpolation": 0})
+
     # Spacemouse action scale
-    spacemouse_action_scale: float = 0.04
+    spacemouse_action_scale: float = 0.015
     spacemouse_deadzone: float = 0.1
 
     # Controller mode: 'simple', 'chunking', 'blending', 'intv'
     mode: str = 'simple'
+
+    # Control space: 'joint' or 'cartesian'
+    ctrl_space: str = 'cartesian'
 
     horizon: int = 16
 
@@ -75,8 +85,12 @@ class DPEvalConfig:
 
     def __post_init__(self):
         """Validate configuration."""
-        if self.mode not in ['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello']:
-            raise ValueError(f"Invalid mode: {self.mode}. Must be 'simple', 'chunking', 'blending', 'intv', 'controlnet','teleop','gello'.")
+        valid_modes = ['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test']
+        if self.mode not in valid_modes:
+            raise ValueError(f"Invalid mode: {self.mode}. Must be one of {valid_modes}.")
+
+        if self.ctrl_space not in ['joint', 'cartesian']:
+            raise ValueError(f"Invalid ctrl_space: {self.ctrl_space}. Must be 'joint' or 'cartesian'.")
 
         if self.mode in ['chunking', 'blending']:
             if self.action_exec_size + self.policy_delay > self.horizon:
@@ -100,6 +114,8 @@ class DPEvalConfig:
             debug_plotting=args.debug_plotting,
             policy_server_port=args.policy_port,
             pcd_server_port=args.pcd_port,
+            ik_server_port=args.ik_port,
             visualize=args.visualize,
             img_policy=args.img_policy,
+            ctrl_space=args.ctrl_space,
         )

@@ -26,7 +26,7 @@ from crisp_py.robot_config import FrankaConfig
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 from diff_eval_utils.diffusion_constants import DPEvalConfig
-from diff_eval_utils.diffusion_transforms import convert_action_from_fingertip_to_gripper
+from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_action_from_fingertip_to_gripper, mat_to_rot6d
 
 # Configuration
 PINK_SERVER_URL = "http://localhost:5002"
@@ -148,11 +148,12 @@ def load_trajectory_from_hdf5(file_path: str):
     return hand_poses, hand_grasp
 
 
-def convert_poses_to_gripper_frame(hand_poses, rot6d_to_mat, mat_to_rot6d):
+def convert_poses_to_gripper_frame(hand_poses):
     """Convert fingertip poses to gripper frame (same as replay_hand_poses.py)."""
     gripper_poses = []
 
     for hand_pose in hand_poses:
+        # Build 10D action from hand pose
         action = np.concatenate([
             hand_pose[:3],
             mat_to_rot6d.forward(
@@ -161,28 +162,19 @@ def convert_poses_to_gripper_frame(hand_poses, rot6d_to_mat, mat_to_rot6d):
             [0.0]  # grasp placeholder
         ])
 
-        action_converted, gripper_rotation = convert_action_from_fingertip_to_gripper(
-            action, rot6d_to_mat, ret_orig=False, clip=False
-        )
+        # Convert to Pose then to gripper frame
+        pose, grasp = ten_d_action_to_pose(action, clip=False)
+        gripper_pos, gripper_rotation = convert_action_from_fingertip_to_gripper(pose)
 
-        gripper_pos = action_converted[:3]
         gripper_quat = gripper_rotation.as_quat()  # [qx, qy, qz, qw]
-
         gripper_poses.append((gripper_pos, gripper_quat))
 
     return gripper_poses
 
 
 def main():
-    # Setup rotation transformers (from diffusion_policy)
-    import sys
     config = DPEvalConfig()
     CTRL_FREQ = config.ctrl_freq
-    sys.path.append(config.diffusion_policy_path)
-    from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-
-    rot6d_to_mat = RotationTransformer('rotation_6d', 'matrix')
-    mat_to_rot6d = RotationTransformer('matrix', 'rotation_6d')
 
     # Initialize Pink IK client
     print("Connecting to Pink IK server...")
@@ -202,7 +194,7 @@ def main():
 
     # Convert to gripper frame
     print("Converting poses to gripper frame...")
-    gripper_poses = convert_poses_to_gripper_frame(hand_poses, rot6d_to_mat, mat_to_rot6d)
+    gripper_poses = convert_poses_to_gripper_frame(hand_poses)
 
     # Setup robot
     print("\nInitializing robot...")

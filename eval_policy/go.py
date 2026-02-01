@@ -16,13 +16,13 @@ Debug mode:
 - --direct-policy: Use policy directly without server (requires --ckpt-path)
 
 Examples:
-python eval/eval.py --mode simple --n-steps 9999
-python eval/eval.py --mode simple --n-steps 60 --debug-plotting
-python eval/eval.py --mode controlnet --n-steps 100  # ControlNet mode with intervention detection
-python eval/eval.py --mode intv  # Recording mode (no n-steps needed)
-python eval/eval.py --mode gello  # Gello joint control mode (no n-steps needed)
-python eval/eval.py --vis-pcd  # Inspection mode
-python eval/eval.py --mode simple --n-steps 60 --direct-policy --ckpt-path /home/mingxi/Downloads/epoch=0080-val_loss=0.019.ckpt  # Debug mode
+python eval/eval.py --mode simple --ctrl-space cartesian --n-steps 9999
+python eval/eval.py --mode simple --ctrl-space joint --n-steps 60 --debug-plotting
+python eval/eval.py --mode controlnet --ctrl-space cartesian --n-steps 100  # ControlNet mode
+python eval/eval.py --mode intv --ctrl-space cartesian  # Recording mode (no n-steps needed)
+python eval/eval.py --mode gello --ctrl-space joint  # Gello joint control mode (no n-steps needed)
+python eval/eval.py --vis-pcd --ctrl-space cartesian  # Inspection mode
+python eval/eval.py --mode simple --ctrl-space cartesian --n-steps 60 --direct-policy --ckpt-path /path/to/ckpt  # Debug mode
 """
 
 import argparse
@@ -44,7 +44,7 @@ from scipy.spatial.transform import Rotation as R
 
 # Import our utilities
 from diff_eval_utils.diffusion_constants import DPEvalConfig, START_POSITION
-from diff_eval_utils.diffusion_clients import PolicyClient, PcdProcessingClient, DirectPolicyWrapper
+from diff_eval_utils.diffusion_clients import PolicyClient, PcdProcessingClient, DirectPolicyWrapper, PinkIKClient
 from diff_eval_utils.diffusion_controllers import create_controller
 from diff_eval_utils.ros_utils import JointStateSubscriber
 # from diff_eval_utils.diffusion_visualization import visualize_robot_pcd, np2o3d
@@ -60,9 +60,9 @@ def parse_args():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello'],
+        choices=['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test'],
         default='simple',
-        help='Control mode: simple (sequential), chunking (buffered), blending (merged), intv (recording control), controlnet (intervention detection with re-inference), teleop (spacemouse teleoperation only), or gello (joint control from gello_control_signal topic)'
+        help='Control mode: simple (sequential), chunking (buffered), blending (merged), intv (recording control), controlnet (intervention detection with re-inference), teleop (spacemouse teleoperation only), gello (joint control from gello_control_signal topic), or test (impedance tracking test)'
     )
 
     parser.add_argument(
@@ -123,6 +123,21 @@ def parse_args():
         help='Use image-only policy (excludes pcd, depth, joint_pos from observations)'
     )
 
+    parser.add_argument(
+        '--ctrl-space',
+        type=str,
+        choices=['joint', 'cartesian'],
+        required=True,
+        help='Control space: joint (uses IK + joint impedance) or cartesian (Cartesian impedance)'
+    )
+
+    parser.add_argument(
+        '--ik-port',
+        type=int,
+        default=5002,
+        help='Pink IK server port (only used when --ctrl-space joint)'
+    )
+
     return parser.parse_args()
 
 class MyRobot(Robot):
@@ -148,8 +163,8 @@ def setup_robot(config: DPEvalConfig):
     Returns:
         Initialized Robot instance
     """
-    gripper_config = GripperConfig.from_yaml("./config/gripper_right.yaml")
-    gripper = Gripper(gripper_config=gripper_config, namespace="/right/gripper")
+    gripper_config = GripperConfig.from_yaml("./config/gripper_robotiq.yaml")
+    gripper = Gripper(gripper_config=gripper_config)
     gripper.wait_until_ready()
     gripper.set_target(1.0)  # Open gripper
 
@@ -162,14 +177,17 @@ def setup_robot(config: DPEvalConfig):
 
     print("Going to home position...")
     robot.home()
-    robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
-    robot.cartesian_controller_parameters_client.load_param_config(
-        file_path="config/control/default_cartesian_impedance.yaml"
-    )
+    if config.ctrl_space == 'joint':
+        robot.controller_switcher_client.switch_controller("joint_impedance_controller")
+        robot.joint_controller_parameters_client.load_param_config(
+            file_path="config/control/joint_impedance_controller.yaml"
+        )
+    else:
+        robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+        robot.cartesian_controller_parameters_client.load_param_config(
+            file_path="config/control/default_cartesian_impedance.yaml"
+        )
 
-    # print("Moving to start position...")
-    # robot.move_to(position=START_POSITION, speed=0.1)
-    # time.sleep(1)
     return robot, gripper
 
 def setup_point_cloud_manager(toolbox_path: str):
@@ -198,130 +216,12 @@ def setup_point_cloud_manager(toolbox_path: str):
     return manager, joint_state_subscriber, spin_thread
 
 
-def pcd_inspect(config: DPEvalConfig):
-    """Point cloud inspection mode: visualize observations without running policy.
-
-    Args:
-        config: DPEvalConfig instance with visualize=True
-    """
-    print("\n" + "="*60)
-    print("POINT CLOUD INSPECTION MODE")
-    print("="*60)
-    print("Visualizing observations without running policy or actions")
-    print("Press Ctrl+C to exit")
-    print("="*60 + "\n")
-
-    # Setup hardware (robot for joint states only, no movement)
-    print("Initializing robot (read-only for joint states)...")
-    robot = Robot(namespace="")
-    robot.wait_until_ready()
-    print(f"Robot ready. Joint values: {robot.joint_values}")
-    print(f"End effector pose: {robot.end_effector_pose}")
-
-    robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
-    robot.cartesian_controller_parameters_client.load_param_config(
-        file_path="config/control/spacemouse_cartesian_impedance.yaml"
-    )
-    time.sleep(2.0)
-
-    # Setup sensors
-    print("\nInitializing sensors...")
-    print(config.toolbox_path)
-    manager, joint_state_subscriber, _ = setup_point_cloud_manager(config.toolbox_path)
-
-    # Setup point cloud processing client
-    print(f"\nConnecting to PCD processing server at localhost:{config.pcd_server_port}...")
-    pcd_client = PcdProcessingClient(f"http://localhost:{config.pcd_server_port}")
-
-    # Create rate for observation loop
-    rate = robot.node.create_rate(1.0)  # 1 Hz for inspection
-
-    robot.move_to(position=[0.6, 0.0, 0.3], pose=R.from_euler('XYZ', [0, np.pi/12, 0]), speed=0.1)
-
-
-    print("\n" + "="*60)
-    print("Starting observation visualization loop...")
-    print("Press Ctrl+C to stop")
-    print("="*60 + "\n")
-
-    step = 0
-    try:
-        while True:
-            print(f"\n--- Observation {step} ---")
-
-            # Get current joint positions and robot pose
-            joint_positions = joint_state_subscriber.joint_values
-            eef_pose_raw = robot.end_effector_pose
-            from diff_eval_utils.diffusion_transforms import get_pose_from_robot
-            eef_pose = get_pose_from_robot(eef_pose_raw)
-
-            print(f"Joint positions: {joint_positions[:3]}...")  # Print first 3 for brevity
-            print(f"EEF position: {eef_pose[:3]}")
-
-            # Get raw point cloud
-            print("Capturing point cloud...")
-            raw_pcd = manager.get_latest_pointcloud()
-            print(f"Raw point cloud shape: {raw_pcd.shape if raw_pcd is not None else 'None'}")
-
-            # Get RGB-D images
-            print("Capturing RGB-D images...")
-            inhand_cam = 'cam4'
-            rgb, depth = manager.get_latest_rgbd(inhand_cam)
-            print(f"RGB shape: {rgb.shape if rgb is not None else 'None'}")
-            print(f"Depth shape: {depth.shape if depth is not None else 'None'}")
-            
-            # Process point cloud with visualization
-            if raw_pcd is not None:
-                print("Processing point cloud...")
-                processed_pcd, render_pcd = pcd_client.process_pcd(raw_pcd, eef_pose, joint_positions)
-                print(f"Processed PCD shape: {processed_pcd.shape}")
-                print(f"Render PCD shape: {render_pcd.shape}")
-
-                # Process images with visualization
-                rgb_dict = {inhand_cam: rgb}
-                depth_dict = {inhand_cam: depth}
-                processed_rgb_dict, processed_depth_dict = pcd_client.process_images(rgb_dict, depth_dict)
-
-                # Visualize if requested
-                if config.visualize:
-                    import matplotlib.pyplot as plt
-                    import open3d as o3d
-
-                    # Visualize RGB image
-                    plt.figure(figsize=(8, 6))
-                    plt.imshow(processed_rgb_dict[inhand_cam].astype(np.uint8))
-                    plt.title(f"Step {step}: {inhand_cam} RGB")
-                    plt.axis('off')
-                    plt.show()
-
-                    # Visualize point cloud
-                    # pcd_vis = o3d.geometry.PointCloud()
-                    # pcd_vis.points = o3d.utility.Vector3dVector(processed_pcd[:, :3])
-                    # pcd_vis.colors = o3d.utility.Vector3dVector(processed_pcd[:, 3:])
-                    
-                    # robot_pcd = visualize_robot_pcd(processed_pcd, None, joint_state=joint_positions[1:])
-                    # robot_pcd = np2o3d(robot_pcd)
-                    # o3d.visualization.draw_geometries([pcd_vis], window_name=f"Step {step}: Point Cloud")
-
-            step += 1
-            rate.sleep()
-
-    except KeyboardInterrupt:
-        print("\n\nInspection stopped by user")
-    finally:
-        print("\nCleaning up...")
-        manager.destroy_node()
-        robot.shutdown()
-
-
 def main():
     """Main entry point."""
     args = parse_args()
     config = DPEvalConfig.from_cli_args(args)
     sys.path.append(config.toolbox_path)
     sys.path.append(config.diffusion_policy_path)
-
-    from diffusion_policy.model.common.rotation_transformer import RotationTransformer
 
     # Validate arguments
     if args.direct_policy and not args.ckpt_path:
@@ -352,6 +252,7 @@ def main():
         else:
             print(f"Mode: Teleoperation only (runs until Ctrl+C)")
         print(f"Control frequency: {config.ctrl_freq} Hz")
+        print(f"Control space: {config.ctrl_space}")
         print(f"Debug plotting: {config.debug_plotting}")
         print(f"Visualize observations: {config.visualize}")
         if config.mode in ['teleop', 'gello']:
@@ -363,7 +264,15 @@ def main():
             print(f"Policy mode: SERVER")
             print(f"Policy server: localhost:{config.policy_server_port}")
         print(f"PCD server: localhost:{config.pcd_server_port}")
+        if config.ctrl_space == 'joint':
+            print(f"IK server: localhost:{config.ik_server_port}")
         print("="*60)
+
+        # Setup IK client (only for joint control space)
+        ik_client = None
+        if config.ctrl_space == 'joint':
+            print("\nConnecting to Pink IK server...")
+            ik_client = PinkIKClient(f"http://localhost:{config.ik_server_port}")
 
         # Setup policy client (None for teleop/gello mode)
         if config.mode in ['teleop', 'gello']:
@@ -377,7 +286,6 @@ def main():
             print("Connecting to policy server...")
             policy_client = PolicyClient(f"http://localhost:{config.policy_server_port}", img_policy=config.img_policy)
         # pcd_client = PcdProcessingClient(f"http://localhost:{config.pcd_server_port}")
-        rotation_transformer = RotationTransformer(from_rep='rotation_6d', to_rep='matrix')
 
         # Setup hardware
         print("\nInitializing robot...")
@@ -395,8 +303,7 @@ def main():
             obs_manager=manager,
             joint_state_subscriber=joint_state_subscriber,
             policy_client=policy_client,
-            # pcd_client=pcd_client,
-            rotation_transformer=rotation_transformer,
+            ik_client=ik_client,
             config=config,
             ctrl_freq=config.ctrl_freq,
         )

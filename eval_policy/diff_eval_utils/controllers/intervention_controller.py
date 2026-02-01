@@ -1,13 +1,10 @@
 from diff_eval_utils.controllers.simple_controller import SimpleSequentialController
-from diff_eval_utils.diffusion_transforms import convert_action_from_fingertip_to_gripper
-from diff_eval_utils.diffusion_visualization import visualize_pcd_and_actions
+from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_action_from_fingertip_to_gripper
 import time
 import numpy as np
 from pathlib import Path
 import threading
 from scipy.spatial.transform import Rotation as R
-import matplotlib.pyplot as plt
-from matplotlib import ticker
 from std_msgs.msg import Int32MultiArray
 
 
@@ -30,6 +27,10 @@ class InterventionController(SimpleSequentialController):
         - When READY: Start policy inference → RECORDING
     - 'i': Resume policy from intervention (INTERVENTION → POLICY)
     - Spacemouse: Automatic intervention trigger (POLICY → INTERVENTION)
+
+    Controller Switching:
+    - POLICY_MODE: Uses controller specified in config (joint or cartesian)
+    - INTERVENTION_MODE: Always uses cartesian impedance controller for spacemouse
     """
 
     def __init__(self, *args, **kwargs):
@@ -62,15 +63,14 @@ class InterventionController(SimpleSequentialController):
         # Gripper button state tracking
         self.prev_button_pressed = False
 
-        # Timing tracking for visualization
-        self.timing_events = []  # List of (timestamp, event_type) tuples
-        self.start_recording_time = None
-
         # Action recording for debugging
         self.recorded_actions = []  # List of executed actions
 
         self.ACTION_SCALE = self.config.spacemouse_action_scale
         self.DEADZONE = self.config.spacemouse_deadzone
+
+        self.policy_n_interpolation = self.config.n_interpolation
+        self.intervention_n_interpolation = self.config.teleop['n_interpolation']
 
     def _setup_keyboard_listener(self):
         """Initialize keyboard listener for 'r' and 'i' keys."""
@@ -115,7 +115,7 @@ class InterventionController(SimpleSequentialController):
         from std_msgs.msg import Int32MultiArray
         msg = Int32MultiArray()
         msg.data = [state, 0, 0, 0, 0, 0, 0, 0, 0]
-        print(f"[PUBLISH] Publishing intervention state: {state}")
+        # print(f"[PUBLISH] Publishing intervention state: {state}")
         self.intervention_pub.publish(msg)
 
     def _cleanup(self):
@@ -160,13 +160,12 @@ class InterventionController(SimpleSequentialController):
             print("[START RECORDING] Starting policy inference...")
             print(f"{'='*60}")
 
+            # Ensure impedance controller is active
+            self._switch_to_impedance_controller()
+
             self.recording_state = self.RECORDING
             self.mode = self.POLICY_MODE  # Reset to policy mode
             self.intervention_target_pose = self.robot.end_effector_pose.copy()
-
-            # Reset timing tracking
-            self.timing_events = []
-            self.start_recording_time = time.time()
 
             # Reset action recording
             self.recorded_actions = []
@@ -180,16 +179,14 @@ class InterventionController(SimpleSequentialController):
             print("[STOP RECORDING] Stopping robot actions and resetting to start position...")
             print(f"{'='*60}")
 
-            # Generate timing visualization
-            if len(self.timing_events) > 0:
-                self._plot_timing_events()
-
             # Save recorded actions to .npy file
             if len(self.recorded_actions) > 0:
                 self._save_recorded_actions()
 
             # Reset robot to start position
             self.robot.home()
+
+            # Switch back to impedance controller (home() may have switched to position controller)
             self._switch_to_impedance_controller()
 
             # Update target_pose to match the new robot position after homing
@@ -204,11 +201,29 @@ class InterventionController(SimpleSequentialController):
 
         self._update_buffer()
 
+    def _execute_spacemouse_action(self):
+        new_pos = self.intervention_target_pose.position
+        new_orientation = self.intervention_target_pose.orientation
+
+
+        print(new_pos)
+
+        if self.control_space == 'cartesian':
+            self._execute_cartesian_action(new_pos, new_orientation)
+        elif self.control_space == 'joint':
+            self._execute_joint_action(new_pos, new_orientation)
+        else: 
+            raise NotImplementedError(f"Unknown control space: {self.control_space}")
+
     def _execute_intervention_step(self, spacemouse, recording=True):
-        """Execute one step of spacemouse control.
+        """Execute one step of spacemouse control using cartesian action execution.
+
+        Uses a similar pattern to base controller's _execute_cartesian_action but
+        adapted for delta-based spacemouse control without interpolation.
 
         Args:
             spacemouse: Spacemouse instance
+            recording: Whether recording is active (affects ROS message publishing)
         """
         from std_msgs.msg import Int32MultiArray
 
@@ -220,11 +235,17 @@ class InterventionController(SimpleSequentialController):
         # Detect gripper toggle event
         gripper_toggle = 1 if (button_pressed and not self.prev_button_pressed) else 0
 
-        # Publish intervention signals (always publish during intervention mode)
+        # Check if there's any movement
         has_movement = (dx != 0 or dy != 0 or dz != 0 or droll != 0 or dpitch != 0 or dyaw != 0)
 
-        if (has_movement or gripper_toggle) and recording:
-            # Publish intervention signals (for data collection/logging)
+        # Early return only if no movement AND no gripper action
+        if not has_movement and not gripper_toggle:
+            self._publish_intervention_state(0)
+            self._execute_spacemouse_action()
+            return
+
+        # Publish intervention signals only when recording (for data collection)
+        if recording and (has_movement or gripper_toggle):
             msg = Int32MultiArray()
             # Convert to discrete signals (sign only)
             dx_int = (1 if dx > 0 else -1 if dx < 0 else 0)
@@ -237,15 +258,12 @@ class InterventionController(SimpleSequentialController):
             # state=2 means intervention action
             msg.data = [2, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, gripper_toggle, 0]
             self.intervention_pub.publish(msg)
-        else:
-            self._publish_intervention_state(0)
-            return
 
-        # Update target pose
+        # Update target pose using delta control
         curr_pos = self.intervention_target_pose.position
         curr_euler = self.intervention_target_pose.orientation.as_euler('XYZ')
 
-        # Apply deltas
+        # Apply deltas to compute new target position
         new_pos = np.array([
             curr_pos[0] + dx,
             curr_pos[1] + dy,
@@ -253,30 +271,30 @@ class InterventionController(SimpleSequentialController):
         ])
 
         new_euler = np.array([
-            curr_euler[0] + droll * 2,
-            curr_euler[1] - dpitch * 2,
+            curr_euler[0] + droll * 1,
+            curr_euler[1] - dpitch * 1,
             curr_euler[2] - dyaw * 2  # Match spacemouse_example.py convention
         ])
+        new_orientation = R.from_euler('XYZ', new_euler)
 
-        # Update and send to robot
         self.intervention_target_pose.position = new_pos
-        self.intervention_target_pose.orientation = R.from_euler('XYZ', new_euler)
-        self.robot.set_target(pose=self.intervention_target_pose)
-        # self.arm_rate.sleep()
+        self.intervention_target_pose.orientation = new_orientation
+
+        self.n_interpolation = self.intervention_n_interpolation
+
+        self._execute_spacemouse_action()
+        # Update intervention target pose
+
         # Only print if there's movement
-        if dx != 0 or dy != 0 or dz != 0 or droll != 0 or dpitch != 0 or dyaw != 0:
+        if has_movement:
             print(f"[INTERVENTION] x={new_pos[0]:.4f} y={new_pos[1]:.4f} z={new_pos[2]:.4f} "
                   f"roll={new_euler[0]:.4f} pitch={new_euler[1]:.4f} yaw={new_euler[2]:.4f}")
 
-        # Handle gripper button toggle (button_pressed already retrieved above)
+        # Handle gripper using base controller's gripper execution pattern
         if gripper_toggle:
-            # Toggle gripper state
             new_gripper_value = 1.0 - self.prev_grasp_value
             print(f"[GRIPPER] {'Closing' if new_gripper_value == 1.0 else 'Opening'} gripper...")
-            self.gripper.set_target(1.0 - new_gripper_value)  # Invert for Franka convention
-            self.gripper_rate.sleep()
-            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
-            self.prev_grasp_value = new_gripper_value
+            self._execute_gripper_action(new_gripper_value)
 
         # Update button state for next iteration
         self.prev_button_pressed = button_pressed
@@ -292,10 +310,10 @@ class InterventionController(SimpleSequentialController):
         Args:
             action: 10-element action array [x, y, z, rot6d(6), grasp(1)]
         """
-        action, gripper_pose = convert_action_from_fingertip_to_gripper(action, self.rotation_transformer)
+        pose_action, grasp_action = ten_d_action_to_pose(action)
+        new_position, gripper_pose = convert_action_from_fingertip_to_gripper(pose_action)
 
         # Position deltas
-        new_position = action[:3]
         prev_position = self.target_pose.position
         dx = new_position[0] - prev_position[0]
         dy = new_position[1] - prev_position[1]
@@ -325,34 +343,27 @@ class InterventionController(SimpleSequentialController):
         # state=1 means policy action
         msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_value, 0]
 
-
         self.intervention_pub.publish(msg)
 
-        # Record message encoding timing
-        self.timing_events.append((time.time(), 'message_sent'))
+        self.n_interpolation = self.policy_n_interpolation
 
-        # Record action for debugging
-        self.recorded_actions.append(action.copy())
+        print(f"self.n_interpolation: {self.n_interpolation}")
 
-        self.target_pose.position = new_position
-        # self.target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
-        self.target_pose.orientation = gripper_pose
-        print(f"Moving to position: {new_position}, orientation (euler): {gripper_pose.as_euler('XYZ')}")
-        if not move_to:
-            self.robot.set_target(pose=self.target_pose)
-            self.arm_rate.sleep()
+        if self.control_space == 'cartesian':
+            self._execute_cartesian_action(new_position, gripper_pose, move_to=move_to)
+
+        elif self.control_space == 'joint':
+            assert move_to == False, "move_to not supported in joint control space"
+            self._execute_joint_action(new_position, gripper_pose)
+        
         else:
-            self.robot.move_to(pose=self.target_pose, speed=0.15)
-
-        grasp_value = np.round(np.clip(action[-1], 0, 1))
-        if grasp_value != self.prev_grasp_value:
-            self.gripper.set_target(1 - grasp_value)
-            self.gripper_rate.sleep()
-            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
-        self.prev_grasp_value = grasp_value
+            raise NotImplementedError(f"Invalid control space: {self.control_space}")
+        
+        self._execute_gripper_action(grasp_action)
 
         # Trigger async buffer update (non-blocking)
         self._update_buffer()
+
 
     def _save_recorded_actions(self):
         """Save recorded actions to .npy file with timestamp."""
@@ -372,71 +383,6 @@ class InterventionController(SimpleSequentialController):
 
         print(f"\nRecorded actions saved to: {filename.absolute()}")
         print(f"Total actions saved: {len(self.recorded_actions)}")
-
-    def _plot_timing_events(self):
-        """Generate timing visualization plot."""
-        print("\nGenerating timing events visualization...")
-
-        # Convert timing events to arrays
-        timestamps = np.array([t - self.start_recording_time for t, _ in self.timing_events])
-        event_types = [event_type for _, event_type in self.timing_events]
-
-        # Map event types to numeric values for plotting
-        event_map = {
-            'inference_done': 0,
-            'message_sent': 1,
-            'action_executed': 2
-        }
-
-        # Create plot
-        fig, ax = plt.subplots(figsize=(16, 7))
-
-        # Plot events with vertical lines and time differences
-        colors = {'inference_done': 'red', 'message_sent': 'orange', 'action_executed': 'green'}
-
-        for event_type, y_val in event_map.items():
-            mask = [e == event_type for e in event_types]
-            event_times = timestamps[mask]
-
-            if len(event_times) > 0:
-                # Plot scatter points
-                ax.scatter(event_times, [y_val] * len(event_times),
-                          c=colors[event_type], s=80, alpha=0.8, label=event_type, zorder=3)
-
-                # Draw vertical lines to x-axis
-                for t in event_times:
-                    ax.plot([t, t], [y_val, -0.3], color=colors[event_type],
-                           alpha=0.3, linewidth=1, zorder=1)
-
-                # Add time difference labels between consecutive events
-                for i in range(1, len(event_times)):
-                    time_diff = (event_times[i] - event_times[i-1]) * 1000  # Convert to ms
-                    mid_time = (event_times[i] + event_times[i-1]) / 2
-                    ax.text(mid_time, y_val + 0.15, f'{time_diff:.1f}ms',
-                           ha='center', va='bottom', fontsize=8,
-                           color=colors[event_type], weight='bold')
-
-        # Configure axes with finer granularity
-        ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Event Type', fontsize=12, fontweight='bold')
-        ax.set_yticks(list(event_map.values()))
-        ax.set_yticklabels(list(event_map.keys()))
-        ax.set_ylim(-0.5, 2.5)
-
-        # Finer x-axis ticks
-        ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
-        ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(5))
-
-        ax.set_title('Policy Execution Timing Events', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3, axis='x', which='major')
-        ax.grid(True, alpha=0.15, axis='x', which='minor', linestyle=':')
-        ax.legend(loc='upper right', fontsize=10)
-
-        plt.tight_layout()
-        filename = Path('debug_plots/timing_events.png')
-        plt.savefig(filename, dpi=150, bbox_inches='tight')
-        print(f"Timing events plot saved to: {filename.absolute()}")
-        plt.close()
 
     def run(self, n_steps: int = None):
         """Execute intervention-enabled control with recording state management.
@@ -512,18 +458,18 @@ class InterventionController(SimpleSequentialController):
                                 if first:
                                     time.sleep(0.1)
                                 self._execute_action(action, move_to=False)
-
-                                # Record action execution timing
-                                self.timing_events.append((time.time(), 'action_executed'))
                                 first = False
                                 action_idx += 1
                             
                                 motion = sm.get_motion_state_transformed()
                                 if self._check_for_intervention_trigger(motion):
                                     print(f"\n{'='*60}")
-                                    print("[INTERVENTION TRIGGERED] Spacemouse movement detected!")
+                                    print("[INTERVENTION TRIGGERED] Spacemouse movement detected! Switching Controller")
+                                    time.sleep(1)
                                     print(f"{'='*60}")
+
                                     self.mode = self.INTERVENTION_MODE
+                                    self.robot
 
                                     # Initialize intervention target from current pose
                                     self.intervention_target_pose = self.robot.end_effector_pose.copy()
@@ -534,50 +480,6 @@ class InterventionController(SimpleSequentialController):
 
                             iter_total = time.time() - iter_start
                             print(f"[RECORDING/POLICY] Action {action_idx}: {iter_total*1000:.1f} ms")
-
-                            # if current_actions is None or action_idx >= self.config.action_exec_size:
-                            #     # time.sleep(2)
-                            #     # print("Prev Chunk Done")
-                            #     self._publish_intervention_state(0)
-                            #     obs_dict = self._get_observation()
-                            #     current_actions = self.policy_client.predict_action(obs_dict)
-                            #     action_idx = 0
-                            #     policy_iter += 1
-                            #     print(f"\n[POLICY #{policy_iter}] Got {len(current_actions)} actions")
-
-                            #     # Record inference timing
-                            #     self.timing_events.append((time.time(), 'inference_done'))
-
-                            #     # visualize_pcd_and_actions(obs_dict['pcd'], current_actions)
-
-                            # # Execute next action
-                            # action = current_actions[action_idx].copy()
-                            # # Calculate deltas for monitoring (before executing action)
-                            # if first:
-                            #     time.sleep(0.3)
-                            # self._execute_action(action, move_to=False)
-
-                            # # Record action execution timing
-                            # self.timing_events.append((time.time(), 'action_executed'))
-                            # action_idx += 1
-
-                            # Check for intervention trigger
-                            # motion = sm.get_motion_state_transformed()
-                            # if self._check_for_intervention_trigger(motion):
-                            #     print(f"\n{'='*60}")
-                            #     print("[INTERVENTION TRIGGERED] Spacemouse movement detected!")
-                            #     print(f"{'='*60}")
-                            #     self.mode = self.INTERVENTION_MODE
-
-                            #     # Initialize intervention target from current pose
-                            #     self.intervention_target_pose = self.robot.end_effector_pose.copy()
-                            #     # Invalidate current actions (will get fresh observation on resume)
-                            #     current_actions = None
-                            #     action_idx = 0
-                            #     continue
-
-                            # iter_total = time.time() - iter_start
-                            # print(f"[RECORDING/POLICY] Action {action_idx}: {iter_total*1000:.1f} ms")
 
                     # STATE: INTERVENTION_MODE
                     if self.mode == self.INTERVENTION_MODE or not recording:
@@ -591,6 +493,7 @@ class InterventionController(SimpleSequentialController):
                                 print(f"\n{'='*60}")
                                 print("[RESUMING POLICY] Getting observation from current pose...")
                                 print(f"{'='*60}")
+
                                 self.mode = self.POLICY_MODE
                                 # Sync target_pose with current intervention target
                                 self.target_pose = self.intervention_target_pose.copy()

@@ -104,7 +104,8 @@ def main():
                     pcd_o3d.colors = o3d.utility.Vector3dVector(robo_colors)
                 else:
                     print(f"joint_state_subscriber.joint_values {joint_state_subscriber.joint_values}")
-                    robo_pcd = obs_processor.robot_filter.get_robot_pcd(np.concatenate([joint_state_subscriber.joint_values[:1], joint_state_subscriber.joint_values[2:]]))
+                    robo_pcd = obs_processor.robot_filter.get_robot_pcd(joint_state_subscriber.joint_values)
+                    print(joint_state_subscriber.joint_values)
                     robo_colors = np.ones((robo_pcd.shape[0], 3)) * [1.0, 0.5, 0.0]  # Orange
                     pcd_o3d.points = o3d.utility.Vector3dVector(np.concatenate([pcd[:, :3], robo_pcd], axis=0))
                     pcd_o3d.colors = o3d.utility.Vector3dVector(np.concatenate([pcd[:, 3:], robo_colors], axis=0))

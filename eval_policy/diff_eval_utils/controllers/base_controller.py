@@ -8,24 +8,27 @@ from datetime import datetime
 from scipy.spatial.transform import Rotation as R
 import matplotlib.pyplot as plt
 from matplotlib import cm, ticker
+import copy
+from scipy.spatial.transform import Slerp
+
 
 from diff_eval_utils.diffusion_transforms import (
     get_pose_from_robot,
+    ten_d_action_to_pose,
     convert_action_from_fingertip_to_gripper,
     franka_obs_to_diff_obs
 )
 from diff_eval_utils.diffusion_visualization import visualize_pcd_and_actions
 from diff_eval_utils.diffusion_constants import GRIPPER_NORM_CONST
 from std_msgs.msg import Int32MultiArray
-
+from crisp_py.robot import Pose
 
 
 class RobotController(ABC):
     """Abstract base class for robot controllers."""
 
     def __init__(self, robot, gripper, obs_manager, joint_state_subscriber,
-                 policy_client, rotation_transformer,
-                 config, ctrl_freq=10.0):
+                 policy_client, config, ctrl_freq=10.0, ik_client=None):
         """Initialize the controller.
 
         Args:
@@ -34,25 +37,35 @@ class RobotController(ABC):
             obs_manager: PointCloudManager instance
             joint_state_subscriber: JointStateSubscriber instance
             policy_client: PolicyClient instance
-            pcd_client: PcdProcessingClient instance
-            rotation_transformer: RotationTransformer for 6D rotations
             config: DPEvalConfig instance
             ctrl_freq: Control frequency in Hz
+            ik_client: PinkIKClient instance (required when ctrl_space='joint')
         """
         self.robot = robot
         self.gripper = gripper
         self.obs_manager = obs_manager
         self.joint_state_subscriber = joint_state_subscriber
         self.policy_client = policy_client
-        # self.pcd_client = pcd_client
-        self.rotation_transformer = rotation_transformer
+        self.ik_client = ik_client
         self.config = config
-        self.ctrl_freq = ctrl_freq
+        self.control_space = config.ctrl_space  # 'joint' or 'cartesian'
+        if self.control_space not in ['joint', 'cartesian']:
+            raise ValueError(f"Invalid ctrl_space: {self.control_space}")
+        if self.control_space == 'joint':
+            self.ctrl_freq = config.joint_ctrl_freq
+            print(self.ctrl_freq)
+        else:
+            self.ctrl_freq = config.ctrl_freq
+        print(f"Current Control Frequency: {self.ctrl_freq}")
+        self.n_interpolation = config.n_interpolation
+
+        if self.control_space == 'joint' and self.ik_client is None:
+            raise ValueError("ik_client is required when ctrl_space='joint'")
 
         # Common state
         self.target_pose = robot.end_effector_pose.copy()
-        self.arm_rate = robot.node.create_rate(ctrl_freq)
-        self.gripper_rate = gripper.node.create_rate(ctrl_freq)
+        self.arm_rate = robot.node.create_rate(self.ctrl_freq)
+        self.gripper_rate = gripper.node.create_rate(self.ctrl_freq)
         self.prev_grasp_value = 0.0
 
         # Unified observation buffer (stores all observation data per timestep)
@@ -108,19 +121,15 @@ class RobotController(ABC):
 
     def _update_buffer_sync(self):
         """Synchronously update the observation buffer (called by background thread)."""
+        self.obs_manager.clear_cache()
+        while not self.joint_state_subscriber.is_ready:
+            time.sleep(0.01)
         joint_state = self.joint_state_subscriber.joint_values
-        gripper_state = self.prev_grasp_value
+        # gripper_state = self.joint_state_subscriber.gripper_state[0]
+        gripper_state = 0 
+        # print(f"gripper_state {gripper_state}")
 
-        eef_pose = get_pose_from_robot(self.robot.end_effector_pose)
-
-        # Capture current observation snapshot
-        obs_snapshot = {
-            'eef_pos': eef_pose[:3].astype(np.float32),
-            'eef_quat': eef_pose[3:].astype(np.float32),
-            'gripper_qpos': np.array([gripper_state, gripper_state], dtype=np.float32),
-            'joint_pos': joint_state.astype(np.float32),
-        }
-
+        obs_snapshot = {}
         # Capture images based on policy type
         cam3_rgb, _ = self.obs_manager.get_latest_rgbd('cam3')
         cam4_rgb, cam4_depth = self.obs_manager.get_latest_rgbd('cam4')
@@ -128,6 +137,17 @@ class RobotController(ABC):
         obs_snapshot['cam4_depth'] = cam4_depth.copy()
         obs_snapshot['cam3_rgb'] = cam3_rgb.copy()
         obs_snapshot['pcd'] = self.obs_manager.get_latest_pointcloud()
+        
+        eef_pose = get_pose_from_robot(copy.deepcopy(self.robot.end_effector_pose))
+        # Capture current observation snapshot
+        obs_snapshot = {
+            'eef_pos': eef_pose[:3].astype(np.float32),
+            'eef_quat': eef_pose[3:].astype(np.float32),
+            'gripper_qpos': np.array([gripper_state, gripper_state], dtype=np.float32),
+            'joint_pos': joint_state.astype(np.float32),
+            **obs_snapshot
+        }
+
         update_end_time = time.time()
         obs_snapshot['timestamp'] = update_end_time
         # Thread-safe buffer update
@@ -183,11 +203,88 @@ class RobotController(ABC):
             img_policy=self.config.img_policy,
             visualize=self.config.visualize
         )
+        print(f"obs_pos: {obs_dict['robot0_eef_pos']}")
         self.latest_obs_timestamp = latest_timestamp
         return obs_dict
 
     def _get_inhand_rgb(self):
         return self.obs_manager.get_latest_rgbd('cam4')[0]
+    
+    def _execute_gripper_action(self, grasp_value):
+        grasp_value = np.round(np.clip(grasp_value, 0, 1))
+        if grasp_value != self.prev_grasp_value:
+            self.gripper.set_target(1 - grasp_value)
+            self.gripper_rate.sleep()
+            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
+        self.prev_grasp_value = grasp_value
+    
+    def _execute_cartesian_action(self, action, gripper_pose, move_to=False):
+        assert len(action) >= 3, "Action must have at least 3 elements for position"
+        new_position = action[:3]
+        current_position = copy.deepcopy(self.robot.end_effector_pose.position)
+        print(f"{new_position[0]:.3f}, {new_position[1]:.3f}, {new_position[2]:.3f}\t{current_position[0]:.3f}, {current_position[1]:.3f}, {current_position[2]:.3f}")
+        current_orientation = copy.deepcopy(self.robot.end_effector_pose.orientation)
+
+        if move_to:
+            self.target_pose.position = new_position
+            self.target_pose.orientation = gripper_pose
+            self.robot.move_to(pose=self.target_pose, speed=0.15)
+            return
+        
+        # Create SLERP interpolator for orientation
+
+        if self.n_interpolation == 0:
+            self.target_pose.position = new_position
+            self.target_pose.orientation = gripper_pose
+            self.robot.set_target(pose=self.target_pose)
+            self.arm_rate.sleep()
+            return
+
+        key_rots = R.concatenate([current_orientation, gripper_pose])
+        slerp = Slerp([0, 1], key_rots)
+        
+        for step in range(self.n_interpolation):
+            alpha = (step + 1) / self.n_interpolation
+            # Interpolate position (linear)
+            interp_position = (1 - alpha) * current_position + alpha * new_position
+            # Interpolate orientation (SLERP)
+            interp_orientation = slerp(alpha)
+
+            self.target_pose.position = interp_position
+            self.target_pose.orientation = interp_orientation
+            self.robot.set_target(pose=self.target_pose)
+            self.arm_rate.sleep()
+
+        # Set final pose
+        self.target_pose.position = new_position
+        self.target_pose.orientation = gripper_pose
+
+
+    def _execute_joint_action(self, action, gripper_pose):
+        assert len(action) >= 3, "Action must have at least 3 elements for position"
+        q_current = self.robot.joint_values.copy()
+        target_pos = action[:3]
+        target_quat = gripper_pose.as_quat()
+        q_target, success, timing = self.ik_client.solve_ik(target_pos, target_quat, q_current)
+
+        print(self.robot.end_effector_pose.position, target_pos)
+
+        # print(f"IK time={timing.get('total_time_ms', 0):.4f}ms, iters={timing.get('num_iterations', 0)}, success: {success}")
+        
+        if not success:
+            print(f"  WARNING: IK did not converge")
+            time.sleep(4.0) 
+
+        if self.n_interpolation == 0:
+            self.robot.set_target_joint(q_target)
+            self.arm_rate.sleep()
+        else:
+            for step in range(self.n_interpolation):
+                alpha = (step + 1) / self.n_interpolation
+                q_interp = (1 - alpha) * q_current + alpha * q_target
+                self.robot.set_target_joint(q_interp)
+                self.arm_rate.sleep()
+
 
     def _execute_action(self, action, move_to=False):
         """Execute a single action.
@@ -195,62 +292,37 @@ class RobotController(ABC):
         Args:
             action: 10-element action array [x, y, z, rot6d(6), grasp(1)]
         """
-        action, gripper_pose = convert_action_from_fingertip_to_gripper(action, self.rotation_transformer)
+        pose_action, gripper_action = ten_d_action_to_pose(action)
+        action, gripper_pose = convert_action_from_fingertip_to_gripper(pose_action)
 
-        # Collect debug data if enabled
-        if hasattr(self, 'debug_data_collection') and self.debug_data_collection is not None:
-            timestamp_ms = int(time.time() * 1000)
+        if self.control_space == 'cartesian':
+            self._execute_cartesian_action(action, gripper_pose, move_to=move_to)
 
-            # Save executed action (before transformations)
-            self.debug_data_collection['executed_actions'].append(
-                (timestamp_ms, action.copy())
-            )
-
-            # Save EEF pose
-            current_pose = self.robot.end_effector_pose
-            pose_dict = {
-                'position': current_pose.position.copy(),
-                'orientation_quat': current_pose.orientation.as_quat().copy(),
-                'orientation_matrix': current_pose.orientation.as_matrix().copy()
-            }
-            self.debug_data_collection['eef_poses'].append(
-                (timestamp_ms, pose_dict)
-            )
-
-            # Save actual EEF position
-            self.debug_data_collection['actual_eef_pos'].append(
-                (timestamp_ms, current_pose.position.copy())
-            )
-
-        # Safety check: verify pose change is reasonable
-        new_position = action[:3]
-        print(f"obs & action timestamp {self.latest_obs_timestamp}\t{time.time()}")
-        self.target_pose.position = new_position
-        # self.target_pose.orientation = R.from_euler('XYZ', [np.pi, 0, 0])
-        # gripper_pose=R.from_euler('XYZ', [np.pi, 0, 0])
-        print(f"Moving to position: {new_position}, orientation (euler): {gripper_pose.as_euler('XYZ')}")
-        self.target_pose.orientation = gripper_pose
-        if not move_to:
-            self.robot.set_target(pose=self.target_pose)
-            self.arm_rate.sleep()
+        elif self.control_space == 'joint':
+            assert move_to == False, "move_to not supported in joint control space"
+            self._execute_joint_action(action, gripper_pose)
+        
         else:
-            self.robot.move_to(pose=self.target_pose, speed=0.15)
-
-        grasp_value = np.round(np.clip(action[-1], 0, 1))
-        if grasp_value != self.prev_grasp_value:
-            self.gripper.set_target(1 - grasp_value)
-            self.gripper_rate.sleep()
-            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
-        self.prev_grasp_value = grasp_value
+            raise NotImplementedError(f"Invalid control space: {self.control_space}")
+        
+        self._execute_gripper_action(gripper_action)
 
         # Trigger async buffer update (non-blocking)
         self._update_buffer()
 
     def _switch_to_impedance_controller(self):
-        self.robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
-        self.robot.cartesian_controller_parameters_client.load_param_config(
-            file_path="config/control/spacemouse_cartesian_impedance.yaml"
-        )
+        if self.control_space == 'cartesian':
+            self.robot.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+            self.robot.cartesian_controller_parameters_client.load_param_config(
+                file_path="config/control/spacemouse_cartesian_impedance.yaml"
+            )
+        elif self.control_space == 'joint':
+            self.robot.controller_switcher_client.switch_controller("joint_impedance_controller")
+            self.robot.joint_controller_parameters_client.load_param_config(
+                file_path="config/control/joint_impedance_controller.yaml"
+            )
+        else:
+            raise NotImplementedError(f"Invalid control space: {self.control_space}")
 
     def cleanup(self):
         """Clean up resources. Call this when done with the controller."""

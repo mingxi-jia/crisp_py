@@ -1,4 +1,5 @@
 from diff_eval_utils.controllers.base_controller import RobotController
+from diff_eval_utils.diffusion_transforms import rot6d_to_mat
 import time
 import numpy as np
 import threading
@@ -63,7 +64,7 @@ class ChunkingController(RobotController):
                 self.action_queue.append((action.copy(), self.inference_count))
         else:
             # Subsequent: add actions starting from policy_delay
-            start_idx = self.config.policy_delay + 2
+            start_idx = self.config.policy_delay 
             end_idx = start_idx + self.config.action_exec_size
             for action in actions[start_idx:end_idx]:
                 self.action_queue.append((action.copy(), self.inference_count))
@@ -90,7 +91,7 @@ class ChunkingController(RobotController):
                             self.action_queue.append((action.copy(), self.inference_count))
                         self.first_inference_round = False
                     else:
-                        start_idx = self.config.policy_delay + 4
+                        start_idx = self.config.policy_delay + 2
                         end_idx = start_idx + self.config.action_exec_size
                         for action in actions[start_idx:end_idx]:
                             self.action_queue.append((action.copy(), self.inference_count))
@@ -107,6 +108,8 @@ class ChunkingController(RobotController):
         self.inference_thread.start()
 
     def _enforce_fixed_frequency(self):
+        if self.control_space == 'joint':
+            return
         curr_time = time.time()
         if self.last_execution_time is not None:
             timing_adjust_constant = 0.001
@@ -120,6 +123,7 @@ class ChunkingController(RobotController):
     def run(self, n_steps: int):
         """Execute chunking control with async inference."""
         n_steps_done = 0
+        self.first_inference_round = True
 
         if self.config.debug_plotting:
             self.start_time = time.time()
@@ -129,7 +133,6 @@ class ChunkingController(RobotController):
         while self.inference_in_progress:
             time.sleep(0.002)  # Wait for first inference
 
-        self.first_inference_round = True
         while n_steps_done < n_steps:
             loop_start = time.time()
 
@@ -259,7 +262,7 @@ class ChunkingController(RobotController):
                         value = action[2]
                     else:  # Yaw
                         rot6d = action[3:9]
-                        rotmat = self.rotation_transformer.forward(rot6d.reshape(1, 6))[0]
+                        rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))[0]
                         value = np.arctan2(rotmat[1, 0], rotmat[0, 0])
 
                     x_vals.append(n_step)

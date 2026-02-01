@@ -256,6 +256,85 @@ class PcdProcessingClient:
         return processed_rgb, processed_depth, is_contact
 
 
+class PinkIKClient:
+    """Client for communicating with the Pink IK server."""
+
+    def __init__(self, server_url: str = "http://localhost:5002"):
+        self.server_url = server_url
+        self._check_health()
+
+    def _check_health(self):
+        """Check if server is healthy."""
+        try:
+            response = requests.get(f"{self.server_url}/health", timeout=5)
+            if response.status_code == 200:
+                print("Connected to Pink IK server successfully")
+            else:
+                raise ConnectionError("Pink IK server unhealthy")
+        except Exception as e:
+            raise ConnectionError(f"Cannot connect to Pink IK server: {e}")
+
+    def solve_ik(self, position: np.ndarray, orientation_quat: np.ndarray, q_init: np.ndarray = None) -> tuple[np.ndarray, bool]:
+        """Solve IK for a single pose.
+
+        Args:
+            position: End-effector position [x, y, z]
+            orientation_quat: Orientation quaternion [qx, qy, qz, qw]
+            q_init: Initial joint configuration for warm-starting (optional)
+
+        Returns:
+            Tuple of (joint_config, success)
+            - joint_config: Joint configuration (7 DOF)
+            - success: Whether IK converged
+        """
+        payload = {
+            "position": position.tolist() if isinstance(position, np.ndarray) else position,
+            "orientation": orientation_quat.tolist() if isinstance(orientation_quat, np.ndarray) else orientation_quat,
+        }
+        if q_init is not None:
+            payload["q_init"] = q_init.tolist() if isinstance(q_init, np.ndarray) else q_init
+
+        response = requests.post(f"{self.server_url}/solve_ik", json=payload, timeout=10)
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Pink IK server error: {response.text}")
+
+        result = response.json()
+        return np.array(result.get("q", [])), result.get("success", False), result.get("timing", {})
+
+    def solve_trajectory(self, poses: list[tuple[np.ndarray, np.ndarray]], q_init: np.ndarray = None) -> tuple[list[np.ndarray], bool]:
+        """Solve IK for a trajectory of poses (batch processing with warm-starting).
+
+        Args:
+            poses: List of (position, orientation_quat) tuples
+            q_init: Initial joint configuration for first pose (optional)
+
+        Returns:
+            Tuple of (joint_trajectory, success)
+            - joint_trajectory: List of joint configurations
+            - success: Whether all IK solutions converged
+        """
+        pose_dicts = []
+        for pos, quat in poses:
+            pose_dicts.append({
+                "position": pos.tolist() if isinstance(pos, np.ndarray) else pos,
+                "orientation": quat.tolist() if isinstance(quat, np.ndarray) else quat,
+            })
+
+        payload = {"poses": pose_dicts}
+        if q_init is not None:
+            payload["q_init"] = q_init.tolist() if isinstance(q_init, np.ndarray) else q_init
+
+        response = requests.post(f"{self.server_url}/solve_trajectory", json=payload, timeout=30)
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Pink IK server error: {response.text}")
+
+        result = response.json()
+        trajectory = [np.array(q) for q in result.get("trajectory", [])]
+        return trajectory, result.get("success", False)
+
+
 class DirectPolicyWrapper:
     """Direct policy wrapper that mimics PolicyClient interface but runs policy locally.
 

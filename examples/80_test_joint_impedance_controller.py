@@ -31,7 +31,7 @@ from crisp_py.robot_config import FrankaConfig
 # Add path for diffusion policy imports
 sys.path.append('/home/mingxi/mingxi_ws/crisp/crisp_py/eval_policy')
 from diff_eval_utils.diffusion_constants import DPEvalConfig
-from diff_eval_utils.diffusion_transforms import convert_action_from_fingertip_to_gripper
+from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_action_from_fingertip_to_gripper, mat_to_rot6d
 
 # Configuration
 PINK_SERVER_URL = "http://localhost:5002"
@@ -124,12 +124,13 @@ def load_trajectory_from_hdf5(file_path: str):
     return hand_poses, hand_grasp
 
 
-def convert_poses_to_gripper_frame(hand_poses, rot6d_to_mat, mat_to_rot6d):
+def convert_poses_to_gripper_frame(hand_poses):
     """Convert fingertip poses to gripper frame."""
 
     gripper_poses = []
 
     for hand_pose in hand_poses:
+        # Build 10D action from hand pose
         action = np.concatenate([
             hand_pose[:3],
             mat_to_rot6d.forward(
@@ -138,13 +139,11 @@ def convert_poses_to_gripper_frame(hand_poses, rot6d_to_mat, mat_to_rot6d):
             [0.0]  # grasp placeholder
         ])
 
-        action_converted, gripper_rotation = convert_action_from_fingertip_to_gripper(
-            action, rot6d_to_mat, ret_orig=False, clip=False
-        )
+        # Convert to Pose then to gripper frame
+        pose, grasp = ten_d_action_to_pose(action, clip=False)
+        gripper_pos, gripper_rotation = convert_action_from_fingertip_to_gripper(pose)
 
-        gripper_pos = action_converted[:3]
         gripper_quat = gripper_rotation.as_quat()  # [qx, qy, qz, qw]
-
         gripper_poses.append((gripper_pos, gripper_quat))
 
     return gripper_poses
@@ -214,14 +213,7 @@ def plot_trajectory_results(ts, ee_poses, target_poses):
 def main():
     # Load config
     config = DPEvalConfig()
-    CTRL_FREQ = config.ctrl_freq
-
-    # Setup rotation transformers (from diffusion_policy)
-    sys.path.append(config.diffusion_policy_path)
-    from diffusion_policy.model.common.rotation_transformer import RotationTransformer
-
-    rot6d_to_mat = RotationTransformer('rotation_6d', 'matrix')
-    mat_to_rot6d = RotationTransformer('matrix', 'rotation_6d')
+    CTRL_FREQ = config.joint_ctrl_freq
 
     # Initialize Pink IK client
     print("Connecting to Pink IK server...")
@@ -241,7 +233,7 @@ def main():
 
     # Convert to gripper frame
     print("Converting poses to gripper frame...")
-    gripper_poses = convert_poses_to_gripper_frame(hand_poses, rot6d_to_mat, mat_to_rot6d)
+    gripper_poses = convert_poses_to_gripper_frame(hand_poses)
     gripper_poses = gripper_poses[:30]
     # Setup robot
     print("\nInitializing robot...")
@@ -273,7 +265,7 @@ def main():
     print("Moving to initial pose...")
     q_start = q_current
     q_end = q_first
-    num_init_steps = 50  # More steps for initial movement
+    num_init_steps = 4  # More steps for initial movement
 
     for step in range(num_init_steps):
         alpha = (step + 1) / num_init_steps
