@@ -1,5 +1,5 @@
 from spnav import spnav_open, spnav_poll_event, spnav_close, SpnavMotionEvent, SpnavButtonEvent
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 from collections import defaultdict
 import numpy as np
 import time
@@ -13,7 +13,7 @@ class Spacemouse(Thread):
 
         max_value: {300, 500} 300 for wired version and 500 for wireless
         deadzone: [0,1], number or tuple, axis with value lower than this value will stay at 0
-        
+
         front
         z
         ^   _
@@ -40,6 +40,10 @@ class Spacemouse(Thread):
             [1,0,0],
             [0,1,0]
         ], dtype=dtype)
+
+        # Event-based motion detection: set when any motion above deadzone occurs
+        self._motion_detected = Event()
+        self._motion_lock = Lock()
 
     def get_motion_state(self):
         me = self.motion_event
@@ -70,6 +74,27 @@ class Spacemouse(Thread):
     def is_button_pressed(self, button_id):
         return self.button_state[button_id]
 
+    def has_motion_occurred(self):
+        """Check if any motion above deadzone has occurred since last check.
+
+        This method is useful for detecting intervention triggers during blocking
+        operations (like arm_rate.sleep). Unlike get_motion_state() which only
+        returns the instantaneous state, this returns True if ANY motion occurred
+        since the last call.
+
+        Returns:
+            bool: True if motion was detected, False otherwise
+        """
+        with self._motion_lock:
+            occurred = self._motion_detected.is_set()
+            self._motion_detected.clear()
+            return occurred
+
+    def clear_motion_flag(self):
+        """Clear the motion detected flag without checking it."""
+        with self._motion_lock:
+            self._motion_detected.clear()
+
     def stop(self):
         self.stop_event.set()
         self.join()
@@ -88,10 +113,15 @@ class Spacemouse(Thread):
                 event = spnav_poll_event()
                 if isinstance(event, SpnavMotionEvent):
                     self.motion_event = event
+                    # Check if motion is above deadzone and set flag
+                    state = np.array(event.translation + event.rotation,
+                        dtype=self.dtype) / self.max_value
+                    if np.any(np.abs(state) >= self.deadzone):
+                        self._motion_detected.set()
                 elif isinstance(event, SpnavButtonEvent):
                     self.button_state[event.bnum] = event.press
                 else:
-                    time.sleep(1/200)
+                    time.sleep(1/1000)
         finally:
             spnav_close()
 

@@ -36,7 +36,8 @@ from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_a
 # Configuration
 PINK_SERVER_URL = "http://localhost:5002"
 HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2_smoothed.hdf5"
-NUM_INTERP_STEPS = 4  # Number of interpolation steps between poses
+HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_d1_59_realworld_pretrain.hdf5"
+# NUM_INTERP_STEPS = 4  # Number of interpolation steps between poses
 
 
 class PinkIKClient:
@@ -110,7 +111,7 @@ def setup_robot(config: DPEvalConfig):
 def load_trajectory_from_hdf5(file_path: str):
     """Load hand poses from HDF5 file."""
     dataset = h5py.File(file_path, "r")
-    data = dataset['data']['demo_1']
+    data = dataset['data']['demo_2']
 
     hand_pos = data['obs']['robot0_eef_pos'][:]
     hand_quat = data['obs']['robot0_eef_quat'][:]
@@ -138,7 +139,7 @@ def convert_poses_to_gripper_frame(hand_poses):
             )[0],
             [0.0]  # grasp placeholder
         ])
-
+        print(f"hand_pose[:3]: {hand_pose[:3]}")
         # Convert to Pose then to gripper frame
         pose, grasp = ten_d_action_to_pose(action, clip=False)
         gripper_pos, gripper_rotation = convert_action_from_fingertip_to_gripper(pose)
@@ -214,6 +215,7 @@ def main():
     # Load config
     config = DPEvalConfig()
     CTRL_FREQ = config.joint_ctrl_freq
+    NUM_INTERP_STEPS = config.n_interpolation
 
     # Initialize Pink IK client
     print("Connecting to Pink IK server...")
@@ -234,7 +236,7 @@ def main():
     # Convert to gripper frame
     print("Converting poses to gripper frame...")
     gripper_poses = convert_poses_to_gripper_frame(hand_poses)
-    gripper_poses = gripper_poses[:30]
+    gripper_poses = gripper_poses[:]
     # Setup robot
     print("\nInitializing robot...")
     robot = setup_robot(config)
@@ -265,7 +267,7 @@ def main():
     print("Moving to initial pose...")
     q_start = q_current
     q_end = q_first
-    num_init_steps = 4  # More steps for initial movement
+    num_init_steps = CTRL_FREQ*2  # More steps for initial movement
 
     for step in range(num_init_steps):
         alpha = (step + 1) / num_init_steps
@@ -282,6 +284,8 @@ def main():
 
     for i, (target_pos, target_quat) in enumerate(gripper_poses):
         # Solve IK for this pose
+        print(f'target_pos: {target_pos}')
+        # time.sleep(0.01)
         q_target, success, timing = ik_client.solve_ik(target_pos, target_quat, q_current)
         ik_timing_stats.append(timing)
 
@@ -311,6 +315,7 @@ def main():
             t += 1.0 / CTRL_FREQ
 
         q_current = q_target
+        # q_current = robot.joint_values.copy()
 
     # Print timing statistics
     print("\n" + "=" * 60)

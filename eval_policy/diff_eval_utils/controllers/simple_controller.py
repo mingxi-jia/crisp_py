@@ -26,11 +26,12 @@ class SimpleSequentialController(RobotController):
             obs_dict = self._get_observation()
             t_inference_start = time.time()
             actions = self.policy_client.predict_action(obs_dict)
+            actions_execute = self._post_process_action(actions[:8])
             print(f"inference_took {(time.time() - t_inference_start)*1000:.1f} ms")
             print(obs_dict['robot0_eef_pos'])
             # Execute first 8 actions
             t_start = time.time()
-            for index, action in enumerate(actions[:8]):
+            for index, action in enumerate(actions_execute):
                 if n_steps_done >= n_steps:
                     break
                 # print(action)

@@ -9,6 +9,7 @@ from diff_eval_utils.controllers.chunking_controller import ChunkingController
 from diff_eval_utils.controllers.blending_controller import BlendingChunkingController
 from diff_eval_utils.controllers.gello_controller import GelloController
 from diff_eval_utils.controllers.test_controller import TestController
+from diff_eval_utils.controllers.test_teleop_controller import TestTeleopController
 
 
 def create_controller(mode: str, *args, **kwargs) -> RobotController:
@@ -37,5 +38,7 @@ def create_controller(mode: str, *args, **kwargs) -> RobotController:
         return GelloController(*args, **kwargs)
     elif mode == 'test':
         return TestController(*args, **kwargs)
+    elif mode == 'test_teleop':
+        return TestTeleopController(*args, **kwargs)
     else:
         raise ValueError(f"Unknown controller mode: {mode}")

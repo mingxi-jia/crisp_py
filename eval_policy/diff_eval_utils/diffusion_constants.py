@@ -39,18 +39,31 @@ class DPEvalConfig:
         }
     )
     joint_delta_threshold: float = 0.2  # Max allowed deviation from home pose (rad)
+    n_steps: int = 20
 
     # Control parameters
-    ctrl_freq: float = 7
-    n_interpolation: int = 5
+    ctrl_freq: float = 14
+    n_interpolation: int = 6
     joint_ctrl_freq: float = 24
 
-    n_steps: int = 20
+    # The Action Scale --> 
+    # unit_action = nutella_sort dataset action,
+    # unit_action Freq = joint_ctrl_freq / n_interpolation 
+
+    # These params are working perfectly with the current joint controller
+    n_steps_per_unit_action: int = 20
+    joint_ctrl_freq: float = 100
+    n_interpolation = n_steps_per_unit_action - 1  
+
+    joint_exec_time_tolerance: float = 10.0 # 10 ms tolerance for the delay outside execute action
 
     teleop: dict = field(default_factory=lambda: {"n_interpolation": 0})
 
     # Spacemouse action scale
-    spacemouse_action_scale: float = 0.015
+    spacemouse_action_size: float = 0.007
+    spacemouse_action_scaling_factor: np.ndarray = field(
+        default_factory=lambda: np.array([1, 1, 1, 2, -0.5, -2])
+    )
     spacemouse_deadzone: float = 0.1
 
     # Controller mode: 'simple', 'chunking', 'blending', 'intv'
@@ -85,7 +98,10 @@ class DPEvalConfig:
 
     def __post_init__(self):
         """Validate configuration."""
-        valid_modes = ['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test']
+
+        self.spacemouse_action_scale = self.spacemouse_action_size * self.spacemouse_action_scaling_factor
+
+        valid_modes = ['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test', 'test_teleop']
         if self.mode not in valid_modes:
             raise ValueError(f"Invalid mode: {self.mode}. Must be one of {valid_modes}.")
 

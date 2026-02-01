@@ -16,7 +16,9 @@ from diff_eval_utils.diffusion_transforms import (
     get_pose_from_robot,
     ten_d_action_to_pose,
     convert_action_from_fingertip_to_gripper,
-    franka_obs_to_diff_obs
+    franka_obs_to_diff_obs,
+    ten_d_action_to_pose_batch,
+    convert_action_from_fingertip_to_gripper_batch
 )
 from diff_eval_utils.diffusion_visualization import visualize_pcd_and_actions
 from diff_eval_utils.diffusion_constants import GRIPPER_NORM_CONST
@@ -80,6 +82,10 @@ class RobotController(ABC):
 
         self.latest_obs_timestamp = None
 
+        self._last_joint_target = None
+        self._joint_exec_time = None
+        self._joint_exec_time_tolerance = config.joint_exec_time_tolerance
+
         # Initial synchronous buffer update
         self._update_buffer_sync()
 
@@ -125,8 +131,8 @@ class RobotController(ABC):
         while not self.joint_state_subscriber.is_ready:
             time.sleep(0.01)
         joint_state = self.joint_state_subscriber.joint_values
-        # gripper_state = self.joint_state_subscriber.gripper_state[0]
-        gripper_state = 0 
+        gripper_state = 1 - self.joint_state_subscriber.gripper_state[0]
+        # gripper_state = 0 
         # print(f"gripper_state {gripper_state}")
 
         obs_snapshot = {}
@@ -141,6 +147,7 @@ class RobotController(ABC):
         eef_pose = get_pose_from_robot(copy.deepcopy(self.robot.end_effector_pose))
         # Capture current observation snapshot
         obs_snapshot = {
+            'eef_pos_raw': copy.deepcopy(self.robot.end_effector_pose.position.astype(np.float32)),
             'eef_pos': eef_pose[:3].astype(np.float32),
             'eef_quat': eef_pose[3:].astype(np.float32),
             'gripper_qpos': np.array([gripper_state, gripper_state], dtype=np.float32),
@@ -198,24 +205,34 @@ class RobotController(ABC):
             buffer_copy = [obs.copy() for obs in self.obs_buffer]
         
         latest_timestamp = buffer_copy[-1]['timestamp']
+        print(f"eef_pos_raw: {buffer_copy[-1]['eef_pos_raw']}")
         obs_dict = franka_obs_to_diff_obs(
             buffer_copy,
             img_policy=self.config.img_policy,
             visualize=self.config.visualize
         )
-        print(f"obs_pos: {obs_dict['robot0_eef_pos']}")
         self.latest_obs_timestamp = latest_timestamp
         return obs_dict
 
     def _get_inhand_rgb(self):
         return self.obs_manager.get_latest_rgbd('cam4')[0]
     
+    def _post_process_action(self, actions):
+        # t_start = time.time()
+        poses, grasps = ten_d_action_to_pose_batch(actions)
+        gripper_positions, gripper_rotations = convert_action_from_fingertip_to_gripper_batch(poses)
+        actions_ret = []
+        for idx in range(len(grasps)):
+            actions_ret.append((gripper_positions[idx], gripper_rotations[idx], grasps[idx]))
+        # print(f"post process took {(time.time() - t_start) * 1000} ms")
+        return actions_ret
+    
     def _execute_gripper_action(self, grasp_value):
         grasp_value = np.round(np.clip(grasp_value, 0, 1))
         if grasp_value != self.prev_grasp_value:
             self.gripper.set_target(1 - grasp_value)
             self.gripper_rate.sleep()
-            time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
+            # time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
         self.prev_grasp_value = grasp_value
     
     def _execute_cartesian_action(self, action, gripper_pose, move_to=False):
@@ -262,13 +279,21 @@ class RobotController(ABC):
 
     def _execute_joint_action(self, action, gripper_pose):
         assert len(action) >= 3, "Action must have at least 3 elements for position"
-        q_current = self.robot.joint_values.copy()
+        if self._last_joint_target is None:
+            q_current = self.robot.joint_values.copy()
+        else: 
+            q_current = self._last_joint_target
         target_pos = action[:3]
         target_quat = gripper_pose.as_quat()
+        
+        if self._joint_exec_time is not None:
+            t_since_last_exec = (time.time() - self._joint_exec_time) * 1000 # convert to ms
+            if t_since_last_exec > self._joint_exec_time_tolerance:
+                print(f"WARNING: Control loop too slow, took {t_since_last_exec} for new action to arrive")
+    
         q_target, success, timing = self.ik_client.solve_ik(target_pos, target_quat, q_current)
 
-        print(self.robot.end_effector_pose.position, target_pos)
-
+        # print(self.robot.end_effector_pose.position, target_pos)
         # print(f"IK time={timing.get('total_time_ms', 0):.4f}ms, iters={timing.get('num_iterations', 0)}, success: {success}")
         
         if not success:
@@ -285,22 +310,24 @@ class RobotController(ABC):
                 self.robot.set_target_joint(q_interp)
                 self.arm_rate.sleep()
 
+        self._last_joint_target = q_target
+        self._joint_exec_time = time.time()
+
 
     def _execute_action(self, action, move_to=False):
         """Execute a single action.
 
         Args:
-            action: 10-element action array [x, y, z, rot6d(6), grasp(1)]
+            
         """
-        pose_action, gripper_action = ten_d_action_to_pose(action)
-        action, gripper_pose = convert_action_from_fingertip_to_gripper(pose_action)
+        gripper_position, gripper_rotation, gripper_action = action
 
         if self.control_space == 'cartesian':
-            self._execute_cartesian_action(action, gripper_pose, move_to=move_to)
+            self._execute_cartesian_action(gripper_position, gripper_rotation, move_to=move_to)
 
         elif self.control_space == 'joint':
             assert move_to == False, "move_to not supported in joint control space"
-            self._execute_joint_action(action, gripper_pose)
+            self._execute_joint_action(gripper_position, gripper_rotation)
         
         else:
             raise NotImplementedError(f"Invalid control space: {self.control_space}")

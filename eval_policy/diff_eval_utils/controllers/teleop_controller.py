@@ -274,6 +274,16 @@ class TeleopController(RobotController):
         self.ACTION_SCALE = self.config.spacemouse_action_scale
         self.DEADZONE = self.config.spacemouse_deadzone
 
+        # Override for teleop: no interpolation for fast response
+        teleop_config = getattr(self.config, 'teleop', {})
+        self.n_interpolation = teleop_config.get('n_interpolation', 0)
+
+
+        # Loop frequency tracking
+        self._loop_count = 0
+        self._freq_log_interval = 5.0  # Log every 5 seconds
+        self._last_freq_log_time = None
+
     def _setup_keyboard_listener(self):
         """Initialize keyboard listener for 'r' key."""
         from pynput import keyboard
@@ -317,6 +327,25 @@ class TeleopController(RobotController):
         if self.keyboard_listener is not None:
             self.keyboard_listener.stop()
             print("Keyboard listener stopped")
+
+    def _log_loop_frequency(self):
+        """Log the control loop frequency every _freq_log_interval seconds."""
+        current_time = time.time()
+
+        # Initialize on first call
+        if self._last_freq_log_time is None:
+            self._last_freq_log_time = current_time
+            self._loop_count = 0
+            return
+
+        self._loop_count += 1
+        elapsed = current_time - self._last_freq_log_time
+
+        if elapsed >= self._freq_log_interval:
+            frequency = self._loop_count / elapsed
+            print(f"[FREQ] Control loop: {frequency:.1f} Hz (avg over {elapsed:.1f}s)")
+            self._last_freq_log_time = current_time
+            self._loop_count = 0
 
     def _check_key_command(self, key):
         """Check if a key command was triggered and reset flag."""
@@ -385,8 +414,6 @@ class TeleopController(RobotController):
         # Get spacemouse motion and button state
         motion = spacemouse.get_motion_state_transformed()
         dx, dy, dz, droll, dpitch, dyaw = motion * self.ACTION_SCALE
-        if dz > 0:
-            dz = dz
         button_pressed = spacemouse.is_button_pressed(0)
 
         # Detect gripper toggle event
@@ -420,9 +447,11 @@ class TeleopController(RobotController):
 
         # Update target pose
         curr_pos = self.teleop_target_pose.position
-        # curr_pos = copy.deepcopy(self.robot.end_effector_pose.position)
         curr_euler = self.teleop_target_pose.orientation.as_euler('XYZ')
-        # curr_euler = copy.deepcopy(self.robot.end_effector_pose.orientation.as_euler('XYZ'))
+        
+        # curr_pose = get_pose_from_robot(self.robot.end_effector_pose, ret_pose=True)
+        # curr_pos = curr_pose.position
+        # curr_euler = curr_pose.orientation.as_euler('XYZ')
         # Apply deltas
         new_pos = np.array([
             curr_pos[0] + dx,
@@ -431,12 +460,13 @@ class TeleopController(RobotController):
         ])
 
         new_euler = np.array([
-            curr_euler[0] + droll * 2,
-            curr_euler[1] - dpitch * 2,
-            curr_euler[2] - dyaw * 2  # Match spacemouse_example.py convention
+            curr_euler[0] + droll,
+            curr_euler[1] + dpitch,
+            curr_euler[2] + dyaw 
         ])
         # print(f"{dx:.3f}, {dy:.3f}, {dz:.3f}, {dpitch:.3f}, {dyaw:.3f}, {droll:.3f}")
-        print(self.teleop_target_pose.position, self.robot.end_effector_pose.position)
+        # print(self.teleop_target_pose.position, self.robot.end_effector_pose.position)
+
         new_orient = R.from_euler('XYZ', new_euler)
         # Update teleop_target_pose for next iteration
         self.teleop_target_pose.position = new_pos
@@ -479,6 +509,9 @@ class TeleopController(RobotController):
 
                     # Execute spacemouse control
                     self._execute_teleop_step(sm)
+
+                    # Log loop frequency
+                    self._log_loop_frequency()
 
         except KeyboardInterrupt:
             print("\n\nTeleoperation stopped by user")

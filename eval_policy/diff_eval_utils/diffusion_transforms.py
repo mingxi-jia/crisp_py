@@ -218,3 +218,90 @@ def convert_action_from_fingertip_to_gripper(pose: Pose, ret_orig=False):
     gripper_rotation = R.from_matrix(gripper_pose_mat[:3, :3])
 
     return gripper_position, gripper_rotation
+
+
+def ten_d_action_to_pose_batch(actions, clip=True):
+    """Convert batch of 10D policy actions to Poses and grasp values.
+
+    Uses vectorized operations for speed.
+
+    Args:
+        actions: (N, 10) array of actions from policy_client.predict_action()
+        clip: Whether to apply safety limits on position
+
+    Returns:
+        poses: List of Pose objects
+        grasps: List of grasp values
+    """
+    assert type(actions) == np.ndarray, f"actions needs to be np array, not {type(actions)}"
+    n = actions.shape[0]
+
+    # Extract components (vectorized)
+    positions = actions[:, :3].copy()  # (N, 3)
+    rot6ds = actions[:, 3:9]  # (N, 6)
+    grasps = actions[:, 9].tolist()  # List of N floats
+
+    # Safety limits - vectorized clipping
+    if clip:
+        positions[:, 0] = np.clip(positions[:, 0], 0.3, 0.8)
+        positions[:, 1] = np.clip(positions[:, 1], -0.35, 0.35)
+        positions[:, 2] = np.clip(positions[:, 2], 0, 0.61)
+
+    # Batch convert rot6d to rotation matrices (single forward pass)
+    rotmats = rot6d_to_mat.forward(rot6ds)  # (N, 3, 3)
+
+    # Create Pose objects
+    poses = [
+        Pose(position=positions[i], orientation=R.from_matrix(rotmats[i]))
+        for i in range(n)
+    ]
+
+    return poses, grasps
+
+
+def convert_action_from_fingertip_to_gripper_batch(poses, ret_orig=False):
+    """Convert batch of poses from fingertip frame to gripper frame.
+
+    Uses vectorized operations for speed.
+
+    Args:
+        poses: List of Pose objects in fingertip frame
+        ret_orig: If True, don't apply fingertip offset
+
+    Returns:
+        gripper_positions: (N, 3) array of positions
+        gripper_rotations: List of scipy Rotation objects
+    """
+    n = len(poses)
+
+    # Extract positions and rotmats into arrays
+    positions = np.array([p.position for p in poses])  # (N, 3)
+    rotmats = np.array([p.orientation.as_matrix() for p in poses])  # (N, 3, 3)
+
+    # Build finger pose matrices (N, 4, 4)
+    finger_poses = np.zeros((n, 4, 4))
+    finger_poses[:, :3, :3] = rotmats
+    finger_poses[:, :3, 3] = positions
+    finger_poses[:, 3, 3] = 1.0
+
+    # Build gripper offset matrix (shared for all)
+    if ret_orig:
+        xyz_offset = np.array([0, 0, 0])
+    else:
+        xyz_offset = np.array([0, 0, -FINGER_HAND_OFFSET])
+
+    gripper_offset = np.eye(4)
+    gripper_offset[:3, 3] = xyz_offset
+    gripper_offset[:3, :3] = R.from_euler('XYZ', -1 * ROBOTIQ_ROTATION_OFFSET).as_matrix()
+
+    # Batch matrix multiplication
+    gripper_pose_mats = finger_poses @ gripper_offset  # (N, 4, 4)
+
+    # Extract results
+    gripper_positions = gripper_pose_mats[:, :3, 3]  # (N, 3)
+    gripper_rotations = [
+        R.from_matrix(gripper_pose_mats[i, :3, :3])
+        for i in range(n)
+    ]
+
+    return gripper_positions, gripper_rotations

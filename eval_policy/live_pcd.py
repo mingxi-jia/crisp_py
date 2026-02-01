@@ -13,6 +13,10 @@ from crisp_py.robot import Robot
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 
 from diff_eval_utils.ros_utils import JointStateSubscriber
+from diff_eval_utils.diffusion_transforms import get_pose_from_robot
+from geometry_msgs.msg import PoseStamped
+from scipy.spatial.transform import Rotation as R
+from crisp_py.robot import Pose
 import sys
 import numpy as np
 toolbox_path = '/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool'
@@ -21,7 +25,49 @@ from robot_filter.arm_segmentor import RobotArmSegmentation
 from hand_tool.trajectory_loader import ObservationProcessor
 # %%
 
-NO_ROBOT = False
+NO_ROBOT = True
+
+
+class PoseSubscriber:
+    """A simple ROS2 subscriber to get end-effector pose from /current_pose topic."""
+
+    def __init__(self, node, topic: str = "/current_pose"):
+        """Initialize the pose subscriber.
+
+        Args:
+            node: ROS2 node to attach the subscription to.
+            topic: Topic name to subscribe to.
+        """
+        self._node = node
+        self._received = False
+        self._pose = None  # [x, y, z, qx, qy, qz, qw]
+
+        self._subscription = node.create_subscription(
+            PoseStamped,
+            topic,
+            self._callback,
+            10
+        )
+
+    def _callback(self, msg: PoseStamped):
+        """Update pose from the message."""
+        pos = msg.pose.position
+        ori = msg.pose.orientation
+        self._pose = np.array([
+            pos.x, pos.y, pos.z,
+            ori.x, ori.y, ori.z, ori.w
+        ], dtype=np.float32)
+        self._received = True
+
+    @property
+    def pose(self) -> np.ndarray:
+        """Get pose as [x, y, z, qx, qy, qz, qw]."""
+        return self._pose
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if at least one message has been received."""
+        return self._received
 def main():
     """Test the PointCloudManager."""
     rclpy.init()
@@ -35,6 +81,7 @@ def main():
     manager = PointCloudManager(str(config_path))
     if not NO_ROBOT:
         joint_state_subscriber = JointStateSubscriber(manager, topic="/joint_states")
+        pose_subscriber = PoseSubscriber(manager, topic="/current_pose")
 
         # Initialize robot filter
         robot_seg = RobotArmSegmentation()
@@ -50,12 +97,13 @@ def main():
     vis.create_window(window_name="Real-time Point Cloud", width=800, height=600)
     pcd_o3d = o3d.geometry.PointCloud()
     vis.add_geometry(pcd_o3d)
+    vis.get_render_option().point_size = 15.0 
 
     add_ground = True
     if add_ground:
         x_range = [0.3, 0.9]
         y_range = [-0.3, 0.3]
-        z_ground = 0.00
+        z_ground = 0.01
         
         # Create a mesh for the ground
         ground_mesh = o3d.geometry.TriangleMesh()
@@ -73,7 +121,7 @@ def main():
         ground_mesh.triangles = o3d.utility.Vector3iVector(triangles)
         
         # Color the ground (e.g., light gray)
-        ground_mesh.paint_uniform_color([0.7, 0.7, 0.7])
+        ground_mesh.paint_uniform_color([0.9, 0.2, 0.3])
         
         # Add to visualizer
         vis.add_geometry(ground_mesh)
@@ -81,6 +129,7 @@ def main():
     # Initialize flag for first update
     geometry_added = False
     collect_hand_data = False
+    policy_obs_mode = True  # New mode for policy observation visualization
 
     # Wait and visualize
     print("Waiting for point clouds...")
@@ -94,18 +143,44 @@ def main():
             # Process and visualize point cloud
             if pcd is not None:
                 # Filter and render point cloud
-                pcd = obs_processor.filter_pcd_by_workspace(pcd)
-
                 obs_processor.robot_filter._init_pre_samples()
-                if collect_hand_data or NO_ROBOT:
-                    robo_pcd = obs_processor.get_render_pcd(pcd, np.array([0.6, 0.0, 0.25, 0, np.pi/12, 0, 0]), 1, render_type='gripper')
+
+                if policy_obs_mode and not NO_ROBOT:
+                    # Policy observation mode: uses get_policy_obs for exact policy input visualization
+                    if pose_subscriber.is_ready and joint_state_subscriber.is_ready:
+                        raw_pose = pose_subscriber.pose
+                        # Convert robot EE pose to fingertip frame
+                        robot_pose = Pose(
+                            position=raw_pose[:3],
+                            orientation=R.from_quat(raw_pose[3:])
+                        )
+                        pose = get_pose_from_robot(robot_pose)
+
+                        # Combine gripper state with joint values: [gripper_state, joint1, ..., joint7]
+                        gripper_state = joint_state_subscriber.gripper_state[0] if joint_state_subscriber.gripper_state is not None else 0.0
+                        joint = np.concatenate([[gripper_state], joint_state_subscriber.joint_values])
+
+                        # Call get_policy_obs which matches trajectory_loader.py exactly
+                        render_pcd, _ = obs_processor.get_policy_obs(pcd, pose, joint)
+                        print(f"render_pcd.shape: {render_pcd.shape}")
+                        pcd_o3d.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
+                        pcd_o3d.colors = o3d.utility.Vector3dVector(render_pcd[:, 3:])
+                    else:
+                        # Not ready yet, show filtered point cloud
+                        pcd_filtered = obs_processor.filter_pcd_by_workspace(pcd)
+                        pcd_o3d.points = o3d.utility.Vector3dVector(pcd_filtered[:, :3])
+                        pcd_o3d.colors = o3d.utility.Vector3dVector(pcd_filtered[:, 3:])
+                elif collect_hand_data or NO_ROBOT:
+                    pcd = obs_processor.filter_pcd_by_workspace(pcd)
+                    robo_pcd = obs_processor.get_render_pcd(pcd, np.array([0.5, 0.0, 0.25, 0, np.pi/12, 0, 0]), 1, render_type='gripper')
                     robo_colors = robo_pcd[:, 3:]
                     pcd_o3d.points = o3d.utility.Vector3dVector(robo_pcd[:, :3])
                     pcd_o3d.colors = o3d.utility.Vector3dVector(robo_colors)
                 else:
-                    print(f"joint_state_subscriber.joint_values {joint_state_subscriber.joint_values}")
+                    pcd = obs_processor.filter_pcd_by_workspace(pcd)
+                    # print(f"joint_state_subscriber.joint_values {joint_state_subscriber.joint_values}")
                     robo_pcd = obs_processor.robot_filter.get_robot_pcd(joint_state_subscriber.joint_values)
-                    print(joint_state_subscriber.joint_values)
+                    # print(joint_state_subscriber.joint_values)
                     robo_colors = np.ones((robo_pcd.shape[0], 3)) * [1.0, 0.5, 0.0]  # Orange
                     pcd_o3d.points = o3d.utility.Vector3dVector(np.concatenate([pcd[:, :3], robo_pcd], axis=0))
                     pcd_o3d.colors = o3d.utility.Vector3dVector(np.concatenate([pcd[:, 3:], robo_colors], axis=0))

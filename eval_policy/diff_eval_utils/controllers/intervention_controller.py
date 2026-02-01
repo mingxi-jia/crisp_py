@@ -72,6 +72,15 @@ class InterventionController(SimpleSequentialController):
         self.policy_n_interpolation = self.config.n_interpolation
         self.intervention_n_interpolation = self.config.teleop['n_interpolation']
 
+        # Loop frequency tracking
+        self._loop_count = 0
+        self._freq_log_interval = 5.0  # Log every 5 seconds
+        self._last_freq_log_time = None
+
+
+        self.space_mouse_debug_t_start = time.time()
+        self.policy_debug_t_start = time.time()
+
     def _setup_keyboard_listener(self):
         """Initialize keyboard listener for 'r' and 'i' keys."""
         from pynput import keyboard
@@ -124,18 +133,39 @@ class InterventionController(SimpleSequentialController):
             self.keyboard_listener.stop()
             print("Keyboard listener stopped")
 
-    def _check_for_intervention_trigger(self, spacemouse_motion):
+    def _log_loop_frequency(self):
+        """Log the control loop frequency every _freq_log_interval seconds."""
+        current_time = time.time()
+
+        # Initialize on first call
+        if self._last_freq_log_time is None:
+            self._last_freq_log_time = current_time
+            self._loop_count = 0
+            return
+
+        self._loop_count += 1
+        elapsed = current_time - self._last_freq_log_time
+
+        if elapsed >= self._freq_log_interval:
+            frequency = self._loop_count / elapsed
+            print(f"[FREQ] Control loop: {frequency:.1f} Hz (avg over {elapsed:.1f}s)")
+            self._last_freq_log_time = current_time
+            self._loop_count = 0
+
+    def _check_for_intervention_trigger(self, spacemouse):
         """Check if spacemouse motion triggers intervention.
 
+        Uses the event-based motion detection which captures any motion that
+        occurred since the last check, even during blocking operations like
+        arm_rate.sleep().
+
         Args:
-            spacemouse_motion: 6-element array [dx, dy, dz, droll, dpitch, dyaw]
+            spacemouse: Spacemouse instance
 
         Returns:
             bool: True if intervention should be triggered
         """
-        # Any non-zero motion triggers intervention
-        motion_detected = np.any(np.abs(spacemouse_motion) > 1e-6)
-        return motion_detected
+        return spacemouse.has_motion_occurred()
 
     def _check_key_command(self, key):
         """Check if a key command was triggered and reset flag.
@@ -167,6 +197,10 @@ class InterventionController(SimpleSequentialController):
             self.mode = self.POLICY_MODE  # Reset to policy mode
             self.intervention_target_pose = self.robot.end_effector_pose.copy()
 
+            # Clear any accumulated motion events to avoid false intervention triggers
+            if self.spacemouse is not None:
+                self.spacemouse.clear_motion_flag()
+
             # Reset action recording
             self.recorded_actions = []
 
@@ -184,6 +218,7 @@ class InterventionController(SimpleSequentialController):
                 self._save_recorded_actions()
 
             # Reset robot to start position
+            self._publish_intervention_state(0)
             self.robot.home()
 
             # Switch back to impedance controller (home() may have switched to position controller)
@@ -207,6 +242,7 @@ class InterventionController(SimpleSequentialController):
 
 
         print(new_pos)
+        print(f"space mouse time sleep = {(time.time() - self.space_mouse_debug_t_start) * 1000}ms")
 
         if self.control_space == 'cartesian':
             self._execute_cartesian_action(new_pos, new_orientation)
@@ -214,6 +250,7 @@ class InterventionController(SimpleSequentialController):
             self._execute_joint_action(new_pos, new_orientation)
         else: 
             raise NotImplementedError(f"Unknown control space: {self.control_space}")
+        self.space_mouse_debug_t_start = time.time()
 
     def _execute_intervention_step(self, spacemouse, recording=True):
         """Execute one step of spacemouse control using cartesian action execution.
@@ -271,9 +308,9 @@ class InterventionController(SimpleSequentialController):
         ])
 
         new_euler = np.array([
-            curr_euler[0] + droll * 1,
-            curr_euler[1] - dpitch * 1,
-            curr_euler[2] - dyaw * 2  # Match spacemouse_example.py convention
+            curr_euler[0] + droll,
+            curr_euler[1] + dpitch,
+            curr_euler[2] + dyaw  # Match spacemouse_example.py convention
         ])
         new_orientation = R.from_euler('XYZ', new_euler)
 
@@ -299,8 +336,6 @@ class InterventionController(SimpleSequentialController):
         # Update button state for next iteration
         self.prev_button_pressed = button_pressed
 
-        self.arm_rate.sleep()
-
         # Trigger async buffer update (non-blocking)
         self._update_buffer()
 
@@ -310,8 +345,7 @@ class InterventionController(SimpleSequentialController):
         Args:
             action: 10-element action array [x, y, z, rot6d(6), grasp(1)]
         """
-        pose_action, grasp_action = ten_d_action_to_pose(action)
-        new_position, gripper_pose = convert_action_from_fingertip_to_gripper(pose_action)
+        new_position, gripper_pose, grasp_action = action
 
         # Position deltas
         prev_position = self.target_pose.position
@@ -334,14 +368,11 @@ class InterventionController(SimpleSequentialController):
         dpitch_int = (1 if dpitch > 0 else -1 if dpitch < 0 else 0)
         dyaw_int = (1 if dyaw > 0 else -1 if dyaw < 0 else 0)
 
-        # Extract gripper value
-        grasp_value = int(np.round(np.clip(action[-1], 0, 1)))
-
         # Publish policy action state with deltas and gripper value
         msg = Int32MultiArray()
         # Format: [state, dx, dy, dz, droll, dpitch, dyaw, gripper, reset]
         # state=1 means policy action
-        msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_value, 0]
+        msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_action, 0]
 
         self.intervention_pub.publish(msg)
 
@@ -349,16 +380,16 @@ class InterventionController(SimpleSequentialController):
 
         print(f"self.n_interpolation: {self.n_interpolation}")
 
+        print(f"policy time sleep = {(time.time() - self.policy_debug_t_start) * 1000}ms")
         if self.control_space == 'cartesian':
             self._execute_cartesian_action(new_position, gripper_pose, move_to=move_to)
-
         elif self.control_space == 'joint':
             assert move_to == False, "move_to not supported in joint control space"
-            self._execute_joint_action(new_position, gripper_pose)
-        
+            self._execute_joint_action(new_position, gripper_pose)        
         else:
             raise NotImplementedError(f"Invalid control space: {self.control_space}")
-        
+        self.policy_debug_t_start = time.time()
+
         self._execute_gripper_action(grasp_action)
 
         # Trigger async buffer update (non-blocking)
@@ -452,20 +483,21 @@ class InterventionController(SimpleSequentialController):
                             
                             self._publish_intervention_state(0)
                             obs_dict = self._get_observation()
-                            current_actions = self.policy_client.predict_action(obs_dict)
-                            for action in current_actions[:self.config.action_exec_size]:
+                            actions_raw = self.policy_client.predict_action(obs_dict)
+                            current_actions = self._post_process_action(actions_raw[:self.config.action_exec_size])
+
+                            for action in current_actions:
                                 # Calculate deltas for monitoring (before executing action)
                                 if first:
                                     time.sleep(0.1)
                                 self._execute_action(action, move_to=False)
                                 first = False
                                 action_idx += 1
-                            
-                                motion = sm.get_motion_state_transformed()
-                                if self._check_for_intervention_trigger(motion):
+
+                                if self._check_for_intervention_trigger(sm):
                                     print(f"\n{'='*60}")
                                     print("[INTERVENTION TRIGGERED] Spacemouse movement detected! Switching Controller")
-                                    time.sleep(1)
+                                    # time.sleep(1)
                                     print(f"{'='*60}")
 
                                     self.mode = self.INTERVENTION_MODE
@@ -495,14 +527,20 @@ class InterventionController(SimpleSequentialController):
                                 print(f"{'='*60}")
 
                                 self.mode = self.POLICY_MODE
+                                self._update_buffer()
                                 # Sync target_pose with current intervention target
                                 self.target_pose = self.intervention_target_pose.copy()
+                                # Clear motion flag to avoid immediate re-intervention
+                                sm.clear_motion_flag()
                                 # Will get fresh observation on next iteration
                                 continue
                     if not recording:
                         # Not recording, publish idle state and sleep briefly
                         self._publish_intervention_state(0)
                         time.sleep(0.1)
+
+                    # Log loop frequency
+                    self._log_loop_frequency()
 
         except KeyboardInterrupt:
             print("\n\nRecording stopped by user")

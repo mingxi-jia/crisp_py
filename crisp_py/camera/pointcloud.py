@@ -158,7 +158,7 @@ class PointCloudManager(Node):
         self.depth_images = []
         while self.rgb_images == [] or self.depth_images == []:
             time.sleep(0.002)  # Wait for first callback
-            # print("No point celoud received yet.")
+            # print("No point cloud received yet.")
 
         # Process each camera
         all_points = []
@@ -197,7 +197,7 @@ class PointCloudManager(Node):
         else:
             while self.rgb_images == [] or self.depth_images == []:
                 time.sleep(0.01)  # Wait for first callback
-                # print("No RGB image received yet.")
+                print("No RGB image received yet.")
             name2idx = {"cam1": 0, "cam2": 1, "cam3": 2}
             return self.rgb_images[name2idx[cam_name]], self.depth_images[name2idx[cam_name]]
 

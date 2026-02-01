@@ -1,5 +1,4 @@
 from diff_eval_utils.controllers.base_controller import RobotController
-from diff_eval_utils.diffusion_transforms import rot6d_to_mat
 import time
 import numpy as np
 import threading
@@ -51,23 +50,24 @@ class ChunkingController(RobotController):
         """Run policy inference and add actions to queue."""
         # Get observation and predict
         obs_dict = self._get_observation()
-        actions = self.policy_client.predict_action(obs_dict)
+        actions_raw = self.policy_client.predict_action(obs_dict)
+        actions = self._post_process_action(actions_raw)
 
         # Store for debug plotting
         if self.config.debug_plotting:
-            self.all_predicted_chunks.append((self.inference_count, actions.copy()))
+            self.all_predicted_chunks.append((self.inference_count, list(actions)))
 
         # Add actions to queue
         if len(self.action_queue) == 0:
             # First time: add first action_exec_size actions
             for action in actions[:self.config.action_exec_size]:
-                self.action_queue.append((action.copy(), self.inference_count))
+                self.action_queue.append((action, self.inference_count))
         else:
             # Subsequent: add actions starting from policy_delay
-            start_idx = self.config.policy_delay 
+            start_idx = self.config.policy_delay
             end_idx = start_idx + self.config.action_exec_size
             for action in actions[start_idx:end_idx]:
-                self.action_queue.append((action.copy(), self.inference_count))
+                self.action_queue.append((action, self.inference_count))
 
         self.last_inference_time = time.time()
         self.inference_count += 1
@@ -78,23 +78,24 @@ class ChunkingController(RobotController):
             try:
                 # Get observation and predict
                 obs_dict = self._get_observation()
-                actions = self.policy_client.predict_action(obs_dict)
-
+                actions_raw = self.policy_client.predict_action(obs_dict)
+                actions = self._post_process_action(actions_raw)
+                
                 # Store for debug plotting
                 if self.config.debug_plotting:
-                    self.all_predicted_chunks.append((self.inference_count, actions.copy()))
+                    self.all_predicted_chunks.append((self.inference_count, list(actions)))
 
                 # Thread-safe queue update
                 with self.inference_lock:
                     if self.first_inference_round:
                         for action in actions[:self.config.action_exec_size]:
-                            self.action_queue.append((action.copy(), self.inference_count))
+                            self.action_queue.append((action, self.inference_count))
                         self.first_inference_round = False
                     else:
-                        start_idx = self.config.policy_delay + 2
+                        start_idx = self.config.policy_delay
                         end_idx = start_idx + self.config.action_exec_size
                         for action in actions[start_idx:end_idx]:
-                            self.action_queue.append((action.copy(), self.inference_count))
+                            self.action_queue.append((action, self.inference_count))
 
                     self.last_inference_time = time.time()
                     self.inference_count += 1
@@ -148,10 +149,10 @@ class ChunkingController(RobotController):
 
             if queue_has_actions:
                 # Enforce fixed control frequency
-                if self.enforce_fixed_freq:
-                    self._enforce_fixed_frequency()
-                if inference_count == 0:
-                    time.sleep(0.05)
+                # if self.enforce_fixed_freq:
+                #     self._enforce_fixed_frequency()
+                # if inference_count == 0:
+                #     time.sleep(0.05)
                 self._execute_action(action)
                 self.last_execution_time = time.time()
 
@@ -251,18 +252,18 @@ class ChunkingController(RobotController):
                 y_vals = []
 
                 for action_idx in range(len(actions)):
-                    action = actions[action_idx]
+                    # action is (gripper_position, gripper_rotation, grasp_value)
+                    gripper_position, gripper_rotation, _ = actions[action_idx]
                     n_step = start_step + action_idx
 
                     if label == 'X Position (m)':
-                        value = action[0]
+                        value = gripper_position[0]
                     elif label == 'Y Position (m)':
-                        value = action[1]
+                        value = gripper_position[1]
                     elif label == 'Z Position (m)':
-                        value = action[2]
+                        value = gripper_position[2]
                     else:  # Yaw
-                        rot6d = action[3:9]
-                        rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))[0]
+                        rotmat = gripper_rotation.as_matrix()
                         value = np.arctan2(rotmat[1, 0], rotmat[0, 0])
 
                     x_vals.append(n_step)

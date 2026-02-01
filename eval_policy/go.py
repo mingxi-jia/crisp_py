@@ -60,9 +60,9 @@ def parse_args():
     parser.add_argument(
         '--mode',
         type=str,
-        choices=['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test'],
+        choices=['simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test', 'test_teleop'],
         default='simple',
-        help='Control mode: simple (sequential), chunking (buffered), blending (merged), intv (recording control), controlnet (intervention detection with re-inference), teleop (spacemouse teleoperation only), gello (joint control from gello_control_signal topic), or test (impedance tracking test)'
+        help='Control mode: simple (sequential), chunking (buffered), blending (merged), intv (recording control), controlnet (intervention detection with re-inference), teleop (spacemouse teleoperation only), gello (joint control from gello_control_signal topic), test (impedance tracking test), or test_teleop (teleop with tracking plots)'
     )
 
     parser.add_argument(
@@ -243,19 +243,21 @@ def main():
         print("="*60)
         print(f"Diffusion Policy Control - Mode: {config.mode.upper()}")
         print("="*60)
-        if config.mode not in ['intv', 'teleop', 'gello']:
+        if config.mode not in ['intv', 'teleop', 'gello', 'test_teleop']:
             print(f"Steps: {config.n_steps}")
         elif config.mode == 'intv':
             print(f"Mode: Recording control (runs until Ctrl+C)")
         elif config.mode == 'gello':
             print(f"Mode: Gello joint control (runs until Ctrl+C)")
+        elif config.mode == 'test_teleop':
+            print(f"Mode: Test teleoperation with tracking (runs until Ctrl+C)")
         else:
             print(f"Mode: Teleoperation only (runs until Ctrl+C)")
         print(f"Control frequency: {config.ctrl_freq} Hz")
         print(f"Control space: {config.ctrl_space}")
         print(f"Debug plotting: {config.debug_plotting}")
         print(f"Visualize observations: {config.visualize}")
-        if config.mode in ['teleop', 'gello']:
+        if config.mode in ['teleop', 'gello', 'test_teleop']:
             print(f"Policy mode: NONE ({config.mode} only)")
         elif args.direct_policy:
             print(f"Policy mode: DIRECT (debug mode)")
@@ -274,9 +276,9 @@ def main():
             print("\nConnecting to Pink IK server...")
             ik_client = PinkIKClient(f"http://localhost:{config.ik_server_port}")
 
-        # Setup policy client (None for teleop/gello mode)
-        if config.mode in ['teleop', 'gello']:
-            print(f"\n{config.mode.capitalize()} mode: No policy client needed")
+        # Setup policy client (None for teleop/gello/test_teleop mode)
+        if config.mode in ['teleop', 'gello', 'test_teleop']:
+            print(f"\n{config.mode.replace('_', ' ').capitalize()} mode: No policy client needed")
             policy_client = None
         elif args.direct_policy:
             print("\nInitializing policy...")
@@ -312,8 +314,8 @@ def main():
         print("\n" + "="*60)
         print("STARTING CONTROL LOOP")
         print("="*60 + "\n")
-        if config.mode in ['intv', 'teleop', 'gello']:
-            # Recording/teleop/gello mode - runs indefinitely until Ctrl+C
+        if config.mode in ['intv', 'teleop', 'gello', 'test_teleop']:
+            # Recording/teleop/gello/test_teleop mode - runs indefinitely until Ctrl+C
             controller.run()
         else:
             # Normal modes - run for n_steps
