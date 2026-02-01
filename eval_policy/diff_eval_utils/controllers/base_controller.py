@@ -131,7 +131,7 @@ class RobotController(ABC):
         while not self.joint_state_subscriber.is_ready:
             time.sleep(0.01)
         joint_state = self.joint_state_subscriber.joint_values
-        gripper_state = 1 - self.joint_state_subscriber.gripper_state[0]
+        gripper_state = self.joint_state_subscriber.gripper_state[0]
         # gripper_state = 0 
         # print(f"gripper_state {gripper_state}")
 
