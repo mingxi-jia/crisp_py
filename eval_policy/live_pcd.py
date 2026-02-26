@@ -19,14 +19,14 @@ from scipy.spatial.transform import Rotation as R
 from crisp_py.robot import Pose
 import sys
 import numpy as np
+import argparse
 toolbox_path = '/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool'
 sys.path.append(toolbox_path)
 from robot_filter.arm_segmentor import RobotArmSegmentation
 from hand_tool.trajectory_loader import ObservationProcessor
 # %%
 
-NO_ROBOT = True
-
+NO_ROBOT = None
 
 class PoseSubscriber:
     """A simple ROS2 subscriber to get end-effector pose from /current_pose topic."""
@@ -95,9 +95,12 @@ def main():
     # Create non-blocking visualizer
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name="Real-time Point Cloud", width=800, height=600)
+
+    render_option = vis.get_render_option()
     pcd_o3d = o3d.geometry.PointCloud()
     vis.add_geometry(pcd_o3d)
     vis.get_render_option().point_size = 15.0 
+    render_option.background_color = np.array([0.5, 0.5, 0.5])   # <-- black background
 
     add_ground = True
     if add_ground:
@@ -124,7 +127,7 @@ def main():
         ground_mesh.paint_uniform_color([0.9, 0.2, 0.3])
         
         # Add to visualizer
-        vis.add_geometry(ground_mesh)
+        # vis.add_geometry(ground_mesh)
 
     # Initialize flag for first update
     geometry_added = False
@@ -158,10 +161,10 @@ def main():
 
                         # Combine gripper state with joint values: [gripper_state, joint1, ..., joint7]
                         gripper_state = joint_state_subscriber.gripper_state[0] if joint_state_subscriber.gripper_state is not None else 0.0
-                        joint = np.concatenate([[gripper_state], joint_state_subscriber.joint_values])
+                        joint = np.concatenate([[gripper_state, gripper_state], joint_state_subscriber.joint_values])
 
                         # Call get_policy_obs which matches trajectory_loader.py exactly
-                        render_pcd, _ = obs_processor.get_policy_obs(pcd, pose, joint)
+                        pcd, render_pcd = obs_processor.get_policy_obs(pcd, pose, joint)
                         print(f"render_pcd.shape: {render_pcd.shape}")
                         pcd_o3d.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
                         pcd_o3d.colors = o3d.utility.Vector3dVector(render_pcd[:, 3:])
@@ -172,7 +175,7 @@ def main():
                         pcd_o3d.colors = o3d.utility.Vector3dVector(pcd_filtered[:, 3:])
                 elif collect_hand_data or NO_ROBOT:
                     pcd = obs_processor.filter_pcd_by_workspace(pcd)
-                    robo_pcd = obs_processor.get_render_pcd(pcd, np.array([0.5, 0.0, 0.25, 0, np.pi/12, 0, 0]), 1, render_type='gripper')
+                    robo_pcd = obs_processor.get_render_pcd(pcd, np.array([0.5, 0.05, 0.32, 1, 0, 0, 0]), 1, render_type='gripper')
                     robo_colors = robo_pcd[:, 3:]
                     pcd_o3d.points = o3d.utility.Vector3dVector(robo_pcd[:, :3])
                     pcd_o3d.colors = o3d.utility.Vector3dVector(robo_colors)
@@ -203,6 +206,7 @@ def main():
     except Exception as e:
         print(f"\nError occurred: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         # Cleanup
@@ -222,4 +226,9 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="ROS2 point cloud processing")
+    parser.add_argument("--no-robot", action="store_true", help="Run without robot")
+    args = parser.parse_args()
+    NO_ROBOT = args.no_robot
+
     main()

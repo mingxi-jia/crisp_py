@@ -366,7 +366,6 @@ class TeleopController(RobotController):
             print("[RESET] Opening gripper...")
             self.gripper.set_target(1.0)  # 1.0 = open for Franka
             self.gripper_rate.sleep()
-            time.sleep(1.0)
         self.prev_grasp_value = 0.0
 
         # Reset robot to start position
@@ -374,8 +373,9 @@ class TeleopController(RobotController):
         self._switch_to_impedance_controller()
 
         # Update target_pose to match the new robot position after homing
-        time.sleep(1.0)
-        self.target_pose = self.robot.end_effector_pose.copy()
+        # time.sleep(1)
+        self._last_joint_target = None
+        self.target_pose = get_pose_from_robot(self.robot.end_effector_pose.copy(), ret_pose=True)
         self.teleop_target_pose = self.target_pose.copy()
 
         print(f"[RESET] Complete. Resuming teleoperation...")
@@ -456,7 +456,7 @@ class TeleopController(RobotController):
         new_pos = np.array([
             curr_pos[0] + dx,
             curr_pos[1] + dy,
-            max(curr_pos[2] + dz, 0.02)  # Safety: don't go below table
+            max(curr_pos[2] + dz, 0.01)  # Safety: don't go below table
         ])
 
         new_euler = np.array([

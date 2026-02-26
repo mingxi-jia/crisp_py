@@ -220,10 +220,10 @@ class InterventionController(SimpleSequentialController):
             # Reset robot to start position
             self._publish_intervention_state(0)
             self.robot.home()
-
+            time.sleep(2)
+            self._last_joint_target = None
             # Switch back to impedance controller (home() may have switched to position controller)
             self._switch_to_impedance_controller()
-
             # Update target_pose to match the new robot position after homing
             self.target_pose = self.robot.end_effector_pose.copy()
             self.intervention_target_pose = self.target_pose.copy()
@@ -234,7 +234,7 @@ class InterventionController(SimpleSequentialController):
             print(f"[STATE] recording rr-> ready (robot reset)")
             print(f"{'='*60}\n")
 
-        self._update_buffer()
+        self._clear_buffer()
 
     def _execute_spacemouse_action(self):
         new_pos = self.intervention_target_pose.position
@@ -337,7 +337,11 @@ class InterventionController(SimpleSequentialController):
         self.prev_button_pressed = button_pressed
 
         # Trigger async buffer update (non-blocking)
-        self._update_buffer()
+        # self._update_buffer_sync()
+
+    def _per_action(self):
+        return super()._per_action()
+    
 
     def _execute_action(self, action, move_to=False):
         """Execute a single action.
@@ -372,7 +376,7 @@ class InterventionController(SimpleSequentialController):
         msg = Int32MultiArray()
         # Format: [state, dx, dy, dz, droll, dpitch, dyaw, gripper, reset]
         # state=1 means policy action
-        msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, grasp_action, 0]
+        msg.data = [1, dx_int, dy_int, dz_int, droll_int, dpitch_int, dyaw_int, int(grasp_action), 0]
 
         self.intervention_pub.publish(msg)
 
@@ -388,12 +392,12 @@ class InterventionController(SimpleSequentialController):
             self._execute_joint_action(new_position, gripper_pose)        
         else:
             raise NotImplementedError(f"Invalid control space: {self.control_space}")
-        self.policy_debug_t_start = time.time()
-
+        
         self._execute_gripper_action(grasp_action)
 
         # Trigger async buffer update (non-blocking)
-        self._update_buffer()
+        # self._update_buffer_sync()
+        self.policy_debug_t_start = time.time()
 
 
     def _save_recorded_actions(self):
@@ -414,6 +418,7 @@ class InterventionController(SimpleSequentialController):
 
         print(f"\nRecorded actions saved to: {filename.absolute()}")
         print(f"Total actions saved: {len(self.recorded_actions)}")
+        
 
     def run(self, n_steps: int = None):
         """Execute intervention-enabled control with recording state management.
@@ -475,23 +480,18 @@ class InterventionController(SimpleSequentialController):
                         if recording:
                         # STATE: POLICY_MODE
                             # Get new actions if needed
-                            if current_actions is None:
-                                first = True
-                                print("first True")
-                            else:
-                                first = False
-                            
+                            self._update_buffer_sync()
+                            time.sleep(0.25)
                             self._publish_intervention_state(0)
                             obs_dict = self._get_observation()
                             actions_raw = self.policy_client.predict_action(obs_dict)
                             current_actions = self._post_process_action(actions_raw[:self.config.action_exec_size])
 
+                            for curr_pos, _, gripper in current_actions:
+                                print(curr_pos, gripper)
+
                             for action in current_actions:
-                                # Calculate deltas for monitoring (before executing action)
-                                if first:
-                                    time.sleep(0.1)
                                 self._execute_action(action, move_to=False)
-                                first = False
                                 action_idx += 1
 
                                 if self._check_for_intervention_trigger(sm):
@@ -512,6 +512,7 @@ class InterventionController(SimpleSequentialController):
 
                             iter_total = time.time() - iter_start
                             print(f"[RECORDING/POLICY] Action {action_idx}: {iter_total*1000:.1f} ms")
+                            # time.sleep(0.25)
 
                     # STATE: INTERVENTION_MODE
                     if self.mode == self.INTERVENTION_MODE or not recording:
@@ -525,9 +526,9 @@ class InterventionController(SimpleSequentialController):
                                 print(f"\n{'='*60}")
                                 print("[RESUMING POLICY] Getting observation from current pose...")
                                 print(f"{'='*60}")
-
+                                self._last_joint_target = None
                                 self.mode = self.POLICY_MODE
-                                self._update_buffer()
+                                self._update_buffer_sync()
                                 # Sync target_pose with current intervention target
                                 self.target_pose = self.intervention_target_pose.copy()
                                 # Clear motion flag to avoid immediate re-intervention
@@ -539,8 +540,8 @@ class InterventionController(SimpleSequentialController):
                         self._publish_intervention_state(0)
                         time.sleep(0.1)
 
-                    # Log loop frequency
-                    self._log_loop_frequency()
+                    # # Log loop frequency
+                    # self._log_loop_frequency()
 
         except KeyboardInterrupt:
             print("\n\nRecording stopped by user")

@@ -21,36 +21,43 @@ class PolicyClient:
     def __init__(self, server_url: str = "http://localhost:5000", img_policy: bool = False):
         self.server_url = server_url
         self.img_policy = img_policy
+        self.predict_contact = False  # Whether policy supports intervention prediction
         self._check_health()
 
     def _check_health(self):
-        """Check if server is healthy."""
+        """Check if server is healthy and get policy capabilities."""
         try:
             response = requests.get(f"{self.server_url}/health", timeout=5)
             if response.status_code == 200:
-                print("Connected to policy server successfully")
+                result = response.json()
+                self.predict_contact = result.get('predict_contact', False)
+                print(f"Connected to policy server successfully (predict_contact={self.predict_contact})")
             else:
                 raise ConnectionError("Policy server unhealthy")
         except Exception as e:
             raise ConnectionError(f"Cannot connect to policy server: {e}")
         
-    def predict_intervention(self, inhand_rgb: np.ndarray) -> tuple[int, float, dict]:
-        """Get intervention prediction from server.
+    def predict_intervention(self, obs_dict: dict) -> tuple[int, dict]:
+        """Get intervention prediction from server using the policy.
 
         Args:
-            inhand_rgb: In-hand RGB image (C, H, W) format with values in [0, 1]
+            obs_dict: Dictionary of observations (same format as predict_action)
 
         Returns:
-            Tuple of (predicted_label, confidence, timing_dict)
+            Tuple of (predicted_label, timing_dict)
         """
-        # Encode observation as base64
-        data = {
-            'robot0_eye_in_hand_image': {
-                'data': base64.b64encode(inhand_rgb.tobytes()).decode('utf-8'),
-                'dtype': str(inhand_rgb.dtype),
-                'shape': inhand_rgb.shape
+        # Encode observations as base64
+        data = {}
+        for key, value in obs_dict.items():
+            if key in ['pcd_timestamp']:
+                continue
+            array_bytes = value.tobytes()
+            array_b64 = base64.b64encode(array_bytes).decode('utf-8')
+            data[key] = {
+                'data': array_b64,
+                'dtype': str(value.dtype),
+                'shape': value.shape
             }
-        }
 
         # Send request
         response = requests.post(
@@ -69,10 +76,9 @@ class PolicyClient:
         result = response.json()
 
         predicted_label = result['predicted_label']
-        confidence = result['confidence']
         timing = result.get('timing', {})
 
-        return predicted_label, confidence, timing
+        return predicted_label, timing
 
     def predict_action(self, obs_dict: dict) -> np.ndarray:
         """Get action prediction from server.
@@ -388,8 +394,8 @@ class DirectPolicyWrapper:
         """
         with torch.no_grad():
             # Convert numpy observations to torch tensors
-            if not self.img_policy:
-                obs_dict['is_contact'] = np.array([0], dtype=np.float32)
+            # if not self.img_policy:
+            #     obs_dict['is_contact'] = np.array([0], dtype=np.float32)
             if self.img_policy:
                 # img_policy: frames already stacked with time dim, only add batch dim
                 obs_dict_torch = dict_apply(obs_dict,

@@ -70,7 +70,8 @@ except ImportError:
 # Configuration
 SCRIPT_DIR = robot_filter_path + "/panda_description/urdf"
 URDF_PATH = os.path.join(SCRIPT_DIR, "panda_arm_robotiq.urdf")
-HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2_smoothed.hdf5"
+HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/test/test_coffee_prep_d1_realworld_pretrain.hdf5"
+HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/test/test_realworld_pretrain_1.hdf5"
 END_EFFECTOR_FRAME = "robotiq_tcp_link"  # End effector frame from local URDF
 CTRL_FREQ = 10.0  # Hz
 
@@ -122,6 +123,7 @@ def convert_poses_to_gripper_frame(hand_poses):
     gripper_poses = []
     for hand_pose in hand_poses:
         pos = hand_pose[:3]
+        # pos[0] += 0.2
         quat = hand_pose[3:7]
         gripper_pos, gripper_quat = convert_action_from_fingertip_to_gripper_local(pos, quat)
         gripper_poses.append((gripper_pos, gripper_quat))
@@ -249,7 +251,7 @@ def solve_trajectory_ik(robot, gripper_poses, q_init):
         for _ in range(max_iters):
 
             postural_task = pink.tasks.PostureTask(
-                cost=1e-2,  # Adjust this: higher = stiffer/smaller movements
+                cost=1e-3,  # Adjust this: higher = stiffer/smaller movements
             )
             postural_task.set_target(q_current)
 
@@ -641,7 +643,7 @@ def main():
 
     # Convert to gripper frame
     print("Converting poses to gripper frame...")
-    gripper_poses = convert_poses_to_gripper_frame(hand_poses)
+    gripper_poses = convert_poses_to_gripper_frame(hand_poses)        
 
     # Solve IK using home joint position as initial config
     print(f"\nSolving IK (initial config from DPEvalConfig)...")

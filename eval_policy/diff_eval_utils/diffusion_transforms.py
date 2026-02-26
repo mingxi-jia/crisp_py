@@ -10,9 +10,9 @@ import copy
 import sys
 
 try:
-    from .diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET, DPEvalConfig
+    from .diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET, DPEvalConfig, MIN_Z
 except ImportError:
-    from diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET, DPEvalConfig
+    from diffusion_constants import FINGER_HAND_OFFSET, ROBOTIQ_ROTATION_OFFSET, DPEvalConfig, MIN_Z
 
 # Add diffusion_policy to path and create module-level rotation transformer
 _config = DPEvalConfig
@@ -171,7 +171,7 @@ def ten_d_action_to_pose(action, clip=True):
     if clip:
         position[0] = np.clip(position[0], 0.3, 0.8)
         position[1] = np.clip(position[1], -0.35, 0.35)
-        position[2] = np.clip(position[2], 0, 0.61)
+        position[2] = np.clip(position[2], MIN_Z, 0.61)
 
     # Convert rot6d to rotation matrix then to scipy Rotation
     rotmat = rot6d_to_mat.forward(rot6d.reshape(1, 6))[0]
@@ -245,7 +245,7 @@ def ten_d_action_to_pose_batch(actions, clip=True):
     if clip:
         positions[:, 0] = np.clip(positions[:, 0], 0.3, 0.8)
         positions[:, 1] = np.clip(positions[:, 1], -0.35, 0.35)
-        positions[:, 2] = np.clip(positions[:, 2], 0, 0.61)
+        positions[:, 2] = np.clip(positions[:, 2], MIN_Z, 0.61)
 
     # Batch convert rot6d to rotation matrices (single forward pass)
     rotmats = rot6d_to_mat.forward(rot6ds)  # (N, 3, 3)

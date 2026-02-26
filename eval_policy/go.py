@@ -43,7 +43,7 @@ from scipy.spatial.transform import Rotation as R
 
 
 # Import our utilities
-from diff_eval_utils.diffusion_constants import DPEvalConfig, START_POSITION
+from diff_eval_utils.diffusion_constants import DPEvalConfig, START_POSITION, ROBOTIQ_ROTATION_OFFSET
 from diff_eval_utils.diffusion_clients import PolicyClient, PcdProcessingClient, DirectPolicyWrapper, PinkIKClient
 from diff_eval_utils.diffusion_controllers import create_controller
 from diff_eval_utils.ros_utils import JointStateSubscriber
@@ -147,12 +147,19 @@ class MyRobot(Robot):
  
     def home(self):
         super().home()
+        self.my_gripper.set_target(1.0)
+
+        # self.controller_switcher_client.switch_controller("cartesian_impedance_controller")
+        # self.cartesian_controller_parameters_client.load_param_config(
+        #     file_path="config/control/default_cartesian_impedance.yaml"
+        # )
         # init_pose = Pose(
         #     position=START_POSITION,
-        #     orientation=R.from_euler("XYZ", [np.pi, np.pi/12, 0], degrees=False),
+        #     orientation=R.from_euler('XYZ',  np.array([np.pi, 0, -np.pi / 4]) ),
         # )
-        # self.move_to(pose=init_pose, speed=0.15)
-        self.my_gripper.set_target(1.0)
+        # self.move_to(pose=init_pose, speed=0.05)
+        # time.sleep(10)
+
 
 def setup_robot(config: DPEvalConfig):
     """Initialize robot and move to home position.

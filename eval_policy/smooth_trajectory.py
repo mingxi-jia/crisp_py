@@ -16,6 +16,7 @@ from scipy.spatial.transform import Rotation as R, Slerp
 
 # Configuration
 HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2.hdf5"
+HDF5_FILE = "../coffee_making/coffee_making_d1_24_realworld_pretrain.hdf5"
 
 
 def load_ee_trajectory_from_hdf5(file_path: str):

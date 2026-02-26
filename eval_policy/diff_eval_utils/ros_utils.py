@@ -37,6 +37,12 @@ class JointStateSubscriber:
             10
         )
 
+    def clear_cache(self):
+        self._franka_received = False
+        self._robotiq_received = False
+        self.franak_joint_array = None
+        self.gripper_joint_array = None
+
     def _franka_callback(self, msg: JointState):
         """Update joint positions from the message."""
         joint_names = msg.name
@@ -57,7 +63,12 @@ class JointStateSubscriber:
         gripper_state = []
         for i, j in enumerate(joint_names):
             if j in self.gripper_joint_names:
-                gripper_state.append(joint_positions[i])
+                s_gripper = joint_positions[i]
+                if s_gripper >= 0.95:
+                    gripper_state.append(1.0)    
+                else:
+                    gripper_state.append(0.0)
+                # gripper_state.append(joint_positions[i])
 
         self.gripper_joint_array = np.array(gripper_state, dtype=np.float32)
         self._robotiq_received = True

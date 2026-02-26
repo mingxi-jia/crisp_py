@@ -265,6 +265,9 @@ class FrameRecorderNode(Node):
             if self.state.dropped_bundle_count % 100 == 0:
                 self.get_logger().warn(f"Queue full, dropped {self.state.dropped_bundle_count} bundles")
 
+        # Reset this to False to avoid image flooding 
+        self.has_teleop_command = False
+
     # --- Recording Control ---
 
     def _wait_and_start_recording(self):

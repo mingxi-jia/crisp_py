@@ -30,7 +30,7 @@ from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_a
 
 # Configuration
 PINK_SERVER_URL = "http://localhost:5002"
-HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2_smoothed.hdf5"
+HDF5_FILE = "/media/mingxi/T7/XEMB_Experiment/test/test_coffee_prep_d1_realworld_pretrain.hdf5"
 
 
 class PinkIKClient:
@@ -134,7 +134,7 @@ def setup_robot():
 def load_trajectory_from_hdf5(file_path: str):
     """Load hand poses from HDF5 file (same format as replay_hand_poses.py)."""
     dataset = h5py.File(file_path, "r")
-    data = dataset['data']['demo_1']
+    data = dataset['data']['demo_0']
 
     hand_pos = data['obs']['robot0_eef_pos'][:]
     hand_quat = data['obs']['robot0_eef_quat'][:]
@@ -174,7 +174,7 @@ def convert_poses_to_gripper_frame(hand_poses):
 
 def main():
     config = DPEvalConfig()
-    CTRL_FREQ = config.ctrl_freq
+    CTRL_FREQ = config.joint_ctrl_freq
 
     # Initialize Pink IK client
     print("Connecting to Pink IK server...")

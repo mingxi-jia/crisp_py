@@ -18,7 +18,7 @@ from diff_eval_utils.diffusion_transforms import (
     convert_action_from_fingertip_to_gripper,
     franka_obs_to_diff_obs,
     ten_d_action_to_pose_batch,
-    convert_action_from_fingertip_to_gripper_batch
+    convert_action_from_fingertip_to_gripper_batch,
 )
 from diff_eval_utils.diffusion_visualization import visualize_pcd_and_actions
 from diff_eval_utils.diffusion_constants import GRIPPER_NORM_CONST
@@ -84,7 +84,20 @@ class RobotController(ABC):
 
         self._last_joint_target = None
         self._joint_exec_time = None
+        self._max_delta_joint_thresh = 2
+        self._max_delta_joint_angle = 0.0
         self._joint_exec_time_tolerance = config.joint_exec_time_tolerance
+
+        self._last_intervention_state = False
+        self._need_intervention = False
+
+
+        if self.policy_client is None:
+            self.predict_contact = False
+        else:
+            self.predict_contact = self.policy_client.predict_contact
+            assert type(self.policy_client.predict_contact) == bool
+
 
         # Initial synchronous buffer update
         self._update_buffer_sync()
@@ -127,43 +140,78 @@ class RobotController(ABC):
 
     def _update_buffer_sync(self):
         """Synchronously update the observation buffer (called by background thread)."""
+        # t_start = time.time()
         self.obs_manager.clear_cache()
+        self.joint_state_subscriber.clear_cache()
         while not self.joint_state_subscriber.is_ready:
             time.sleep(0.01)
+        # print(f"time took for the obs to be ready: {(time.time() - t_start)*1000} ms")
+
         joint_state = self.joint_state_subscriber.joint_values
         gripper_state = self.joint_state_subscriber.gripper_state[0]
-        # gripper_state = 0 
-        # print(f"gripper_state {gripper_state}")
+        print(f"gripper_state {gripper_state}")
 
-        obs_snapshot = {}
-        # Capture images based on policy type
+        # Capture images and sensor data
         cam3_rgb, _ = self.obs_manager.get_latest_rgbd('cam3')
         cam4_rgb, cam4_depth = self.obs_manager.get_latest_rgbd('cam4')
-        obs_snapshot['cam4_rgb'] = cam4_rgb.copy()
-        obs_snapshot['cam4_depth'] = cam4_depth.copy()
-        obs_snapshot['cam3_rgb'] = cam3_rgb.copy()
-        obs_snapshot['pcd'] = self.obs_manager.get_latest_pointcloud()
-        
+        pcd = self.obs_manager.get_latest_pointcloud()
+
         eef_pose = get_pose_from_robot(copy.deepcopy(self.robot.end_effector_pose))
-        # Capture current observation snapshot
+
+        # Build raw observation snapshot
         obs_snapshot = {
-            'eef_pos_raw': copy.deepcopy(self.robot.end_effector_pose.position.astype(np.float32)),
             'eef_pos': eef_pose[:3].astype(np.float32),
             'eef_quat': eef_pose[3:].astype(np.float32),
             'gripper_qpos': np.array([gripper_state, gripper_state], dtype=np.float32),
             'joint_pos': joint_state.astype(np.float32),
-            **obs_snapshot
+            'cam4_rgb': cam4_rgb.copy(),
+            'cam4_depth': cam4_depth.copy(),
+            'cam3_rgb': cam3_rgb.copy(),
+            'pcd': pcd,
         }
 
+        # Convert to diffusion policy observation format
+        obs_dict = franka_obs_to_diff_obs(
+            [obs_snapshot],  # Single frame
+            img_policy=self.config.img_policy,
+            visualize=self.config.visualize
+        )
+        # !!! This code no longer supports the img_policy
+        # Get intervention prediction from policy (only if policy supports it)
+        if not self.config.img_policy and self.predict_contact:
+            predicted_label = self._predict_intervention(obs_dict)
+            obs_dict['is_contact'] = np.array([predicted_label], dtype=np.float32)
+            if self._last_intervention_state == False and predicted_label == True:
+                self._need_intervention = True
+            else:
+                self._need_intervention = False
+            self._last_intervention_state = predicted_label
+        # else:
+        #     # Policy doesn't support intervention prediction, always set to 0
+        #     obs_dict['is_contact'] = np.array([0], dtype=np.float32)
+        #     self._need_intervention = False
+
         update_end_time = time.time()
-        obs_snapshot['timestamp'] = update_end_time
+        obs_dict['timestamp'] = update_end_time
+
         # Thread-safe buffer update
         with self._buffer_lock:
-            self.obs_buffer.append(obs_snapshot)
+            self.obs_buffer.append(obs_dict)
 
             # Initialize buffer with duplicate if needed (for policies requiring 2 frames)
             while len(self.obs_buffer) < 2:
-                self.obs_buffer.insert(0, obs_snapshot.copy())
+                self.obs_buffer.insert(0, obs_dict.copy())
+
+    def _predict_intervention(self, obs_dict):
+        """Get intervention prediction from the policy server."""
+        try:
+            predicted_label, timing = self.policy_client.predict_intervention(obs_dict)
+            print(f"Intervention prediction: {predicted_label}")
+            return predicted_label
+        except Exception as e:
+            print(f"Warning: Failed to get intervention prediction: {e}")
+            return 0  # Default to no intervention on error
+
 
     def _update_buffer(self):
         """Request a buffer update (non-blocking, runs in background thread)."""
@@ -174,6 +222,13 @@ class RobotController(ABC):
         # Clear completion flag and request update
         self._buffer_update_complete.clear()
         self._buffer_update_requested.set()
+
+    def _clear_buffer(self):
+        """Clear the observation buffer and repopulate with fresh observations."""
+        with self._buffer_lock:
+            self.obs_buffer.clear()
+        # Synchronously update to repopulate the buffer
+        self._update_buffer_sync()
 
     def _wait_for_buffer_update(self, timeout=1.0):
         """Wait for the background buffer update to complete.
@@ -201,35 +256,35 @@ class RobotController(ABC):
             if len(self.obs_buffer) > 20:
                 self.obs_buffer.pop(0)
 
-            # Make a copy of buffer for processing
-            buffer_copy = [obs.copy() for obs in self.obs_buffer]
-        
-        latest_timestamp = buffer_copy[-1]['timestamp']
-        print(f"eef_pos_raw: {buffer_copy[-1]['eef_pos_raw']}")
-        obs_dict = franka_obs_to_diff_obs(
-            buffer_copy,
-            img_policy=self.config.img_policy,
-            visualize=self.config.visualize
-        )
-        self.latest_obs_timestamp = latest_timestamp
+            if not self.obs_buffer:
+                raise RuntimeError("Observation buffer is empty")
+
+            # Get the latest observation
+            obs_dict = self.obs_buffer[-1].copy()
+
+        self.latest_obs_timestamp = obs_dict.get('timestamp')
+        # Remove timestamp from obs_dict before returning (not needed by policy)
+        obs_dict.pop('timestamp', None)
         return obs_dict
 
     def _get_inhand_rgb(self):
         return self.obs_manager.get_latest_rgbd('cam4')[0]
     
     def _post_process_action(self, actions):
-        # t_start = time.time()
+
         poses, grasps = ten_d_action_to_pose_batch(actions)
         gripper_positions, gripper_rotations = convert_action_from_fingertip_to_gripper_batch(poses)
         actions_ret = []
         for idx in range(len(grasps)):
             actions_ret.append((gripper_positions[idx], gripper_rotations[idx], grasps[idx]))
-        # print(f"post process took {(time.time() - t_start) * 1000} ms")
+
         return actions_ret
     
     def _execute_gripper_action(self, grasp_value):
+        print(f"grasp value: {grasp_value}")
         grasp_value = np.round(np.clip(grasp_value, 0, 1))
         if grasp_value != self.prev_grasp_value:
+            print(f"setting target to {1 - grasp_value}")
             self.gripper.set_target(1 - grasp_value)
             self.gripper_rate.sleep()
             # time.sleep(1.0)  # Wait for gripper (Franka driver limitation)
@@ -255,6 +310,7 @@ class RobotController(ABC):
             self.target_pose.orientation = gripper_pose
             self.robot.set_target(pose=self.target_pose)
             self.arm_rate.sleep()
+            self._per_action()
             return
 
         key_rots = R.concatenate([current_orientation, gripper_pose])
@@ -271,13 +327,16 @@ class RobotController(ABC):
             self.target_pose.orientation = interp_orientation
             self.robot.set_target(pose=self.target_pose)
             self.arm_rate.sleep()
+            self._per_action()
 
         # Set final pose
         self.target_pose.position = new_position
         self.target_pose.orientation = gripper_pose
 
-
-    def _execute_joint_action(self, action, gripper_pose):
+    def _per_action(self):
+        return 
+    
+    def _compute_q_target(self, action, gripper_pose):
         assert len(action) >= 3, "Action must have at least 3 elements for position"
         if self._last_joint_target is None:
             q_current = self.robot.joint_values.copy()
@@ -293,26 +352,60 @@ class RobotController(ABC):
     
         q_target, success, timing = self.ik_client.solve_ik(target_pos, target_quat, q_current)
 
-        # print(self.robot.end_effector_pose.position, target_pos)
-        # print(f"IK time={timing.get('total_time_ms', 0):.4f}ms, iters={timing.get('num_iterations', 0)}, success: {success}")
-        
         if not success:
             print(f"  WARNING: IK did not converge")
-            time.sleep(4.0) 
+            time.sleep(2)
+            self.robot.home()
 
+        print(self.robot.end_effector_pose.position, target_pos)
+        # print(f"IK time={timing.get('total_time_ms', 0):.4f}ms, iters={timing.get('num_iterations', 0)}, success: {success}")
+
+        return q_target, q_current
+    
+    def _joint_interpolation(self, q_target, q_current):
+        max_delta = np.max(np.abs(q_target - q_current))
+        self._max_delta_joint_angle = max(self._max_delta_joint_angle, max_delta)
+                
+        if max_delta > self._max_delta_joint_thresh:
+            print(f"!!! Max delta joint angle ever: {np.degrees(self._max_delta_joint_angle):.2f} deg")
+            print(f"!!! Max delta joint angle ever: {np.degrees(self._max_delta_joint_angle):.2f} deg")
+            print(f"!!! Max delta joint angle ever: {np.degrees(self._max_delta_joint_angle):.2f} deg")
+            qs = []
+            n_interp_rounds_needed = max_delta // self._max_delta_joint_thresh + 1
+            print(f"!!! Doing {n_interp_rounds_needed} extra rounds of interpolation to ensure robot safety")
+            print(f"!!! Doing {n_interp_rounds_needed} extra rounds of interpolation to ensure robot safety")
+            print(f"!!! Doing {n_interp_rounds_needed} extra rounds of interpolation to ensure robot safety")
+            for _ in n_interp_rounds_needed:
+                for step in range(self.n_interpolation):
+                    alpha = (step + 1) / self.n_interpolation
+                    q_interp = (1 - alpha) * q_current + alpha * q_target
+                    qs.append(q_interp)
+            return qs
+        
         if self.n_interpolation == 0:
-            self.robot.set_target_joint(q_target)
-            self.arm_rate.sleep()
+            qs = [q_target]
         else:
+            qs = []
             for step in range(self.n_interpolation):
                 alpha = (step + 1) / self.n_interpolation
                 q_interp = (1 - alpha) * q_current + alpha * q_target
-                self.robot.set_target_joint(q_interp)
-                self.arm_rate.sleep()
+                qs.append(q_interp)
+
+        return qs
+    
+    def _joint_execution(self, qs):
+        for q_interp in qs:
+            self.robot.set_target_joint(q_interp)
+            self.arm_rate.sleep()
+            self._per_action()
+
+    def _execute_joint_action(self, action, gripper_pose):
+        q_target, q_current = self._compute_q_target(action, gripper_pose)
+        q_interps = self._joint_interpolation(q_target, q_current)
+        self._joint_execution(q_interps)
 
         self._last_joint_target = q_target
         self._joint_exec_time = time.time()
-
 
     def _execute_action(self, action, move_to=False):
         """Execute a single action.
@@ -335,7 +428,7 @@ class RobotController(ABC):
         self._execute_gripper_action(gripper_action)
 
         # Trigger async buffer update (non-blocking)
-        self._update_buffer()
+        # self._update_buffer_sync()
 
     def _switch_to_impedance_controller(self):
         if self.control_space == 'cartesian':

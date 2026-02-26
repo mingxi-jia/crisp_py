@@ -21,7 +21,7 @@ homing_pose = left_arm.end_effector_pose.copy()
 hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/coffee_prep/replay_hand_test/test_2.hdf5"
 # hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/test_nutella.hdf5"
 hdf5_file_path = "/media/mingxi/T7/nutella_dp_2d/nutella_realworld_abs.hdf5"
-hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_d1_59_realworld_pretrain.hdf5"
+hdf5_file_path = "/media/mingxi/T7/XEMB_Experiment/test/test_coffee_prep_d1_realworld_pretrain.hdf5"
 # Gate the magenitude differences across frames
 dataset = h5py.File(hdf5_file_path, "r")
 data = dataset['data']['demo_0']

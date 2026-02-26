@@ -1,5 +1,5 @@
-nullspace.damping: 0.25
-nullspace.max_tau: 4.0
+nullspace.damping: 0.4
+nullspace.max_tau: 5.0
 nullspace.regularization: 1.0e-06
 nullspace.stiffness: 3.0
 # weights:

@@ -191,7 +191,10 @@ def main():
     intervention_classifier_path = "examples/best_intervention_classifier.pth"
     intervention_classifier_path = "eval/best_intervention_classifier_top_left_corner.pth"
     intervention_classifier_path = "eval_policy/best_intervention_classifier_left_side.pth"
-    
+    intervention_classifier_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_d0/best_intervention_classifier_nutella_d0.pth"
+    intervention_classifier_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_d0/best_intervention_classifier_nutella_d0_extended.pth"
+    intervention_classifier_path = "/media/mingxi/T7/XEMB_Experiment/nutella_sort/nutella_d0/best_intervention_classifier_nutella_d0_15_modified_all.pth"
+
     camera_name = 'cam4'  # Wrist camera name
     config_path = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/robot_configs/camera_info.yaml"  # Camera config path
 

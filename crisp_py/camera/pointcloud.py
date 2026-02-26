@@ -165,7 +165,9 @@ class PointCloudManager(Node):
         all_colors = []
 
         for i, (rgb, depth) in enumerate(zip(self.rgb_images, self.depth_images), 1):
-            # if i != 2:
+            # if i != 3:
+            #     continue
+            # if i == 1:
             #     continue
             cam_name = f"cam{i}"
             cam_params = self.cam_params[cam_name]
@@ -192,12 +194,12 @@ class PointCloudManager(Node):
         if cam_name == "cam4":
             while (self.inhand_image is None) or (self.inhand_depth is None):
                 time.sleep(0.01)  # Wait for first callback
-                print("No in-hand RGB image received yet.")
+                # print("No in-hand RGB image received yet.")
             return self.inhand_image, self.inhand_depth
         else:
             while self.rgb_images == [] or self.depth_images == []:
                 time.sleep(0.01)  # Wait for first callback
-                print("No RGB image received yet.")
+                # print("No RGB image received yet.")
             name2idx = {"cam1": 0, "cam2": 1, "cam3": 2}
             return self.rgb_images[name2idx[cam_name]], self.depth_images[name2idx[cam_name]]
 

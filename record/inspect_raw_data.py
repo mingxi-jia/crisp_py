@@ -11,6 +11,67 @@ import numpy as np
 import shutil
 
 
+def auto_clean_empty_episodes(episodes_path, use_segmented=False, check_cam=3):
+    """
+    Automatically delete episode folders that have no images in the specified camera folder.
+
+    Args:
+        episodes_path: Path to episodes directory
+        use_segmented: If True, check segmented_rgb instead of rgb
+        check_cam: Camera index to check (default: 3)
+
+    Returns:
+        int: Number of episodes deleted
+    """
+    episodes_path = Path(episodes_path)
+    trash_folder = episodes_path / ".trash"
+    trash_folder.mkdir(exist_ok=True)
+
+    episodes = sorted([d for d in episodes_path.iterdir()
+                      if d.is_dir() and d.name.startswith("episode_")])
+
+    if not episodes:
+        return 0
+
+    deleted_count = 0
+    img_subdir = "segmented_rgb" if use_segmented else "rgb"
+
+    for episode_dir in episodes:
+        cam_dir = episode_dir / f"cam{check_cam}" / img_subdir
+
+        # Check if cam folder exists and has images
+        should_delete = False
+        reason = ""
+        if not cam_dir.exists():
+            should_delete = True
+            reason = f"cam{check_cam}/{img_subdir} folder does not exist"
+        else:
+            images = list(cam_dir.glob("*.png"))
+            if len(images) == 0:
+                should_delete = True
+                reason = f"cam{check_cam}/{img_subdir} folder is empty"
+
+        if should_delete:
+            episode_name = episode_dir.name
+            trash_dest = trash_folder / episode_name
+
+            try:
+                # If destination exists in trash, add timestamp
+                if trash_dest.exists():
+                    import time
+                    trash_dest = trash_folder / f"{episode_name}_{int(time.time())}"
+                shutil.move(str(episode_dir), str(trash_dest))
+                print(f"Auto-cleaned: '{episode_name}' ({reason}) -> {trash_dest}")
+                deleted_count += 1
+            except Exception as e:
+                print(f"Error auto-cleaning {episode_name}: {e}")
+
+    if deleted_count > 0:
+        print(f"\nAuto-cleaned {deleted_count} empty episodes (moved to {trash_folder})\n")
+
+    return deleted_count
+
+
 def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, load_eef_pose=False, load_intervention=False, min_traj_length=0):
     """
     Load all RGB images from all episodes.
@@ -426,7 +487,7 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
     return final_img
 
 
-def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleop_mode=False, intervention_mode=False, min_traj_length=0):
+def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleop_mode=False, intervention_mode=False, min_traj_length=0, auto_clean=False):
     """
     Interactive visualization of episodes' RGB images.
 
@@ -437,6 +498,7 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
         teleop_mode: If True, load EEF pose data (no visualization)
         intervention_mode: If True, show intervention indicators
         min_traj_length: Minimum trajectory length to include episode (default: 0, no filtering)
+        auto_clean: If True, automatically delete episodes with empty cam3 folders
 
     Controls:
         - Up/Down arrow: Navigate between episodes
@@ -448,6 +510,11 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
         - 'p': Previous episode
         - 'd': Delete current episode (move to trash)
     """
+    # Auto-clean empty episodes if requested
+    if auto_clean:
+        print("Running auto-clean for episodes with empty cam3 folders...")
+        auto_clean_empty_episodes(episodes_path, use_segmented, check_cam=3)
+
     # Intervention mode includes teleop features plus intervention tracking
     load_eef = teleop_mode or intervention_mode
     load_intv = intervention_mode
@@ -522,7 +589,7 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
         if key == ord('q') or key == 27:  # 'q' or ESC
             break
         elif key == 81 or key == 2:  # Left arrow
-            current_frame = max(0, current_frame - 1)
+            current_frame = (current_frame - 1) % num_frames
             auto_play = False
         elif key == 83 or key == 3:  # Right arrow
             current_frame = min(num_frames - 1, current_frame + 1)
@@ -612,7 +679,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # 
+  # Auto-clean empty episodes and visualize with intervention mode
+  python record/inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes --auto-clean --intv
+
+  # Filter short episodes and show intervention indicators
   python record/inspect_raw_data.py /home/mingxi/mingxi_ws/crisp/crisp_py/raw_datasets/episodes --min-traj-length 150 --intv
 
   # Visualize raw RGB images (4 cameras: 3 static + 1 in-hand)
@@ -684,6 +754,12 @@ Controls:
         help="Minimum trajectory length to include episode (default: 0, no filtering). Use 150 to filter short episodes."
     )
 
+    parser.add_argument(
+        "--auto-clean",
+        action="store_true",
+        help="Automatically delete episodes with empty cam3 folders (moves to .trash)"
+    )
+
     args = parser.parse_args()
 
     path = Path(args.path)
@@ -692,7 +768,7 @@ Controls:
         print(f"Error: Path does not exist: {path}")
         return
 
-    visualize_all_episodes(path, args.num_cams, args.segment, args.teleop, args.intv, args.min_traj_length)
+    visualize_all_episodes(path, args.num_cams, args.segment, args.teleop, args.intv, args.min_traj_length, args.auto_clean)
 
 
 if __name__ == "__main__":

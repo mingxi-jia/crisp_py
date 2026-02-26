@@ -6,10 +6,19 @@ import numpy as np
 
 # Robot-specific constants
 FINGER_HAND_OFFSET = 0.10  # Distance from finger tip to gripper base along z-axis
-# FINGER_HAND_OFFSET = 0.08  # Distance from finger tip to gripper base along z-axis
+FINGER_HAND_OFFSET = 0.08  # Distance from finger tip to gripper base along z-axis
 
 GRIPPER_NORM_CONST = 0.05  # Normalization constant for gripper value
-START_POSITION = np.array([0.55, 0., 0.25 + FINGER_HAND_OFFSET])
+START_POSITION = np.array([0.53, 0.0, 0.22 + FINGER_HAND_OFFSET]) # nutella
+# START_POSITION = np.array([0.53, 0.15, 0.22 + FINGER_HAND_OFFSET]) # coffee making
+START_POSITION = np.array([0.53, 0.0, 0.27 + FINGER_HAND_OFFSET]) # nutella Temp
+START_POSITION = np.array([0.53, 0.0, 0.32 + FINGER_HAND_OFFSET]) 
+START_POSITION = np.array([0.53, 0.05, 0.32 + FINGER_HAND_OFFSET]) 
+
+# START_POSITION = np.array([0.53, -0.05, 0.32 + FINGER_HAND_OFFSET]) # desk_cleanriiiiirriirri_up 02 08 Temp
+MIN_Z = 0.02
+# MIN_Z = 0.0
+
 
 ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, np.pi / 4])  # Rotation offset for Robotiq gripper
 # ROBOTIQ_ROTATION_OFFSET = np.array([0, 0, 0])  # Rotation offset for Robotiq gripper
@@ -24,25 +33,62 @@ class DPEvalConfig:
     pcd_server_port: int = 5001
     ik_server_port: int = 5002
 
+    # home_joint_position: np.ndarray = field(
+    #     default_factory=lambda: np.array(
+    #         [0.003614710905754158, -0.11320468520732234, -0.0001438466713307361, -2.2916872754536546, 0.012506755483931742, 2.3405799781608208, 0.026043922792643427]
+    #     )
+    # ) # 0.53, 0.0, 0.22 + FINGER_HAND_OFFSET
+
+    # home_joint_position: np.ndarray = field(
+    #     default_factory=lambda: np.array(
+    #         [0.0010592495343525858, -0.1855868288347739, 0.002223996584916949, -2.223416249304472, 0.015297965884714102, 2.2045127972035674, 0.012424510319882112]
+    #     )
+    # ) # 0.53, 0.0, 0.27 + FINGER_HAND_OFFSET
+
+    # home_joint_position: np.ndarray = field(
+    #     default_factory=lambda: np.array(
+    #         [-0.00021036731172055314, -0.2114014540483003, 0.003076851296918837, -2.1276072564005877, 0.01883355535690998, 2.0901015289004694, -0.0007363878236070589]
+    #     )
+    # ) # 0.53, 0.0, 0.32 + FINGER_HAND_OFFSET
+
     home_joint_position: np.ndarray = field(
         default_factory=lambda: np.array(
-            [0.0015795138042423453, 0.11460111156789562, 0.00012723805921852443, -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.0]
+            [0.010627665550159485, -0.13752133567683, -0.00031197058307286284, -2.0999258051963947, -0.0026502434610639236, 1.9977846475228178, 0.020550094808096893]
         )
-    )
+    ) # 0.53, 0.0, 0.32 + FINGER_HAND_OFFSET No Rotational Offset
+
+    home_joint_position: np.ndarray = field(
+        default_factory=lambda: np.array(
+            [0.020231719674765586, -0.13386455797511426, 0.07162067359927972, -2.096127669802142, 0.0001639917924899637, 1.9977632412655684, 0.0820641116711499]
+        )
+    ) # 0.53, 0.05, 0.32 + FINGER_HAND_OFFSET No Rotational Offset
+
+
+    
+
+
+    # home_joint_position: np.ndarray = field(
+    #     default_factory=lambda: np.array(
+    #         [-0.026631299793012958, -0.20883834842587998, -0.06749117694827121, -2.1280879622930162, 0.008251831251039166, 2.0957079420315865, -0.09929068380960085]
+    #     )
+    # ) # 0.53, -0.05, 0.32 + FINGER_HAND_OFFSET
+
+
+
 
     # Safety bounds
     eef_bounds: dict = field(
         default_factory=lambda: {
             'x': (0.3, 0.8),
             'y': (-0.35, 0.35),
-            'z': (0.0, 0.61),
+            'z': (MIN_Z, 0.61),
         }
     )
     joint_delta_threshold: float = 0.2  # Max allowed deviation from home pose (rad)
     n_steps: int = 20
 
     # Control parameters
-    ctrl_freq: float = 14
+    ctrl_freq: float = 50
     n_interpolation: int = 6
     joint_ctrl_freq: float = 24
 
@@ -50,19 +96,29 @@ class DPEvalConfig:
     # unit_action = nutella_sort dataset action,
     # unit_action Freq = joint_ctrl_freq / n_interpolation 
 
-    # These params are working perfectly with the current joint controller
-    n_steps_per_unit_action: int = 20
+    # These params are ok with the current joint controller
+    n_steps_per_unit_action: int = 10
     joint_ctrl_freq: float = 100
     n_interpolation = n_steps_per_unit_action - 1  
+
+    # For coffee intv
+    # n_steps_per_unit_action: int = 25
+    # joint_ctrl_freq: float = 100
+    # n_interpolation = n_steps_per_unit_action - 1  
+
+    # For party host
+    # n_steps_per_unit_action: int = 50 #  ~ 1 Hz
+    # joint_ctrl_freq: float = 100
+    # n_interpolation = n_steps_per_unit_action - 1  
 
     joint_exec_time_tolerance: float = 10.0 # 10 ms tolerance for the delay outside execute action
 
     teleop: dict = field(default_factory=lambda: {"n_interpolation": 0})
 
     # Spacemouse action scale
-    spacemouse_action_size: float = 0.007
+    spacemouse_action_size: float = 0.002
     spacemouse_action_scaling_factor: np.ndarray = field(
-        default_factory=lambda: np.array([1, 1, 1, 2, -0.5, -2])
+        default_factory=lambda: np.array([1, 1, 1, 2, -1, -2])
     )
     spacemouse_deadzone: float = 0.1
 
