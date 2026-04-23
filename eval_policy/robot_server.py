@@ -323,7 +323,7 @@ def build_app(server: RobotServer) -> Flask:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Pure robot+camera HTTP server")
-    p.add_argument("--camera-config", required=True,
+    p.add_argument("--camera-config", default='camera_info.yaml',
                    help="Path to camera_info.yaml (PointCloudManager config)")
     p.add_argument("--ctrl-space", default="cartesian",
                    choices=["cartesian", "joint"])
