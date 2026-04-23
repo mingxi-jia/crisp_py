@@ -6,6 +6,7 @@ import torch
 import numpy as np
 import dill
 import hydra
+from omegaconf import OmegaConf
 from flask import Flask, request, jsonify
 import base64
 
@@ -30,34 +31,40 @@ def initialize_policy(ckpt_path: str):
     print(f"Loading policy from {ckpt_path}")
     payload = torch.load(open(ckpt_path, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
+    print(cfg)
+    # print(cfg['policy']['finetune_pcd_model'])
+    if 'task_name' not in cfg.policy:
+        OmegaConf.set_struct(cfg.policy, False)
+        cfg.policy.task_name = "realworld"
+        OmegaConf.set_struct(cfg.policy, True)
+    # Force is_simulation=False for real-robot evaluation (cfg.policy is what DP3 reads)
+    OmegaConf.set_struct(cfg.policy, False)
+    cfg.policy.is_simulation = False
+    OmegaConf.set_struct(cfg.policy, True)
     cfg.logging.resume = False
     cfg.logging.mode = 'offline'
     if hasattr(cfg, 'real_robot_eval'):
         cfg.real_robot_eval = True
         print('set real_robot_eval to True')
 
+    if hasattr(cfg, 'is_simulation'):
+        if cfg.is_simulation:
+            print("Warning: ckpt has is_simulation=True, but setting to False for real robot evaluation")
+        cfg.is_simulation = False
+
     if hasattr(cfg, 'policy') :
         if hasattr(cfg.policy, 'predict_contact'):
             delattr(cfg.policy, 'predict_contact')
         if hasattr(cfg.policy, 'control_mode'):
             delattr(cfg.policy, 'control_mode')
-    # if cfg.is_hand_pretrain == False:
-    #     cfg.load_pretrain_folder = "/media/mingxi/T7/XEMB_Experiment/desk_clean_up/pretrained_ckpts/42_filtered_epoch_0340"
+
+    cfg.load_pretrain_folder = "/mnt/c2b9de74-0cf1-492c-b46e-70d1bc9419fe/mingxi/XEMB/coffee_making/checkpoints/d10_aug_pretrain_0400"
     print(f"cfg.se2_augmentation: {cfg.se2_augmentation}")
 
     print(f"cfg.policy: {cfg.policy}")
     
     cls = hydra.utils.get_class(cfg._target_)
     workspace = cls(cfg, real_robot_eval=True)
-
-    # Filter out zero_conv parameters if they exist in checkpoint but not in model
-    keys_to_remove = ['enc.enc_ih_zero_conv.weight', 'enc.enc_ih_zero_conv.bias']
-    for state_dict_key in payload['state_dicts']:
-        state_dict = payload['state_dicts'][state_dict_key]
-        for param_key in keys_to_remove:
-            if param_key in state_dict:
-                print(f"Removing {param_key} from {state_dict_key}")
-                del state_dict[param_key]
 
     # Exclude optimizer from loading (not needed for inference and has parameter group mismatch)
     workspace.load_payload(payload, exclude_keys=['optimizer'], include_keys=None)
@@ -104,7 +111,7 @@ def predict_intv():
             predicted_label = policy.predict_intervention(obs_dict_torch)
             t_predict = time.time() - t0
 
-        print(f"Intervention prediction: {predicted_label}")
+        # print(f"Intervention prediction: {predicted_label}")
 
         response = {
             'predicted_label': int(predicted_label),
@@ -144,9 +151,11 @@ def predict():
         # Run inference
         with torch.no_grad():
             t0 = time.time()
-            print(obs_dict.keys())
-            for k, v in obs_dict.items():
-                print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+            # print(obs_dict.keys())
+            # for k, v in obs_dict.items():
+            #     print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+            #     if k == "is_contact":
+            #         print(f"    values: {v}")
             if img_policy:
                 # img_policy: frames already stacked with time dim, only add batch dim
                 obs_dict_torch = dict_apply(obs_dict,
@@ -169,7 +178,7 @@ def predict():
         # Encode action as base64
         action_bytes = action.tobytes()
         action_b64 = base64.b64encode(action_bytes).decode('utf-8')
-        print("done encoding action")
+        # print("done encoding action")
         response = {
             'action': {
                 'data': action_b64,

@@ -87,7 +87,7 @@ def main():
         robot_seg = RobotArmSegmentation()
         robot_seg.load_urdf(os.path.join(toolbox_path, "robot_filter/panda_description/urdf/panda_arm_hand.urdf"))
 
-    obs_processor = ObservationProcessor()
+    obs_processor = ObservationProcessor(task='realworld')
 
     spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
     spin_thread.start()
@@ -157,14 +157,18 @@ def main():
                             position=raw_pose[:3],
                             orientation=R.from_quat(raw_pose[3:])
                         )
+                        orientation_offset = R.from_euler('xyz', [np.pi, 0, 0]) # Rotate 180 degrees around X-axis
+                        robot_pose.orientation = robot_pose.orientation * orientation_offset
+                        orientation_offset = R.from_euler('xyz', [0, 0, -np.pi / 2]) # Rotate 90 degrees around Z-axis
+                        robot_pose.orientation = robot_pose.orientation * orientation_offset
                         pose = get_pose_from_robot(robot_pose)
 
                         # Combine gripper state with joint values: [gripper_state, joint1, ..., joint7]
                         gripper_state = joint_state_subscriber.gripper_state[0] if joint_state_subscriber.gripper_state is not None else 0.0
                         joint = np.concatenate([[gripper_state, gripper_state], joint_state_subscriber.joint_values])
-
+                        joint = joint_state_subscriber.joint_values
                         # Call get_policy_obs which matches trajectory_loader.py exactly
-                        pcd, render_pcd = obs_processor.get_policy_obs(pcd, pose, joint)
+                        pcd, render_pcd = obs_processor.get_policy_obs(pcd, pose, joint, gripper_state)
                         print(f"render_pcd.shape: {render_pcd.shape}")
                         pcd_o3d.points = o3d.utility.Vector3dVector(render_pcd[:, :3])
                         pcd_o3d.colors = o3d.utility.Vector3dVector(render_pcd[:, 3:])

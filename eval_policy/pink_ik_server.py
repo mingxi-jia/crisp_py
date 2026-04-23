@@ -27,6 +27,7 @@ import pinocchio as pin
 import pink
 from pink import solve_ik
 from pink.tasks import FrameTask
+from pink.barriers import BodySphericalBarrier
 import sys
 
 import time
@@ -52,6 +53,9 @@ app = Flask(__name__)
 robot = None
 config = None
 end_effector_task = None
+posture_task_1 = None
+self_collision_barrier = None
+
 END_EFFECTOR_FRAME = "fr3_hand_tcp"  # End effector frame name for local URDF
 
 
@@ -61,6 +65,56 @@ HOME_JOINT_POSITION = np.array([
     -1.9088541631957334, 0.007562769235242739, 2.16821183580947, 0.7848162419679248
 ])
 
+GOOD_JOINT_POSITION_1 = np.array([
+    0.04461413917090776, -0.48244150863625346, -0.12345185881715248, -2.7744763331266284, -1.9715285002710865, 2.6243887446139884, 1.3522823784989295
+])
+
+GOOD_JOINT_POSITION_2 = np.array([
+    -0.22961019174013284, -0.4996252881560531, 0.12971274782612352, -2.8556380654427507, -0.39038999253732737, 3.2497209233852304, 0.19488255825328224
+])
+
+def setup_collision_barrier(robot):
+    # 1. Define Frame for Link 2
+    # We place the sphere center at the end of link 2
+    l2_placement = pin.SE3.Identity()
+    l2_placement.translation = np.array([0, 0, 0.15]) # Adjust offset to center of link
+    
+    frame_l2 = pin.Frame(
+        "link2_barrier_frame",
+        robot.model.getJointId("fr3_joint2"), # Parent joint
+        robot.model.getFrameId("fr3_link2"),  # Parent frame
+        l2_placement,
+        pin.FrameType.OP_FRAME,
+    )
+    robot.model.addFrame(frame_l2)
+
+    # 2. Define Frame for Link 5
+    l5_placement = pin.SE3.Identity()
+    l5_placement.translation = np.array([0, 0, 0.15]) # Adjust offset
+    
+    frame_l5 = pin.Frame(
+        "link5_barrier_frame",
+        robot.model.getJointId("fr3_joint5"), 
+        robot.model.getFrameId("fr3_link5"),
+        l5_placement,
+        pin.FrameType.OP_FRAME,
+    )
+    robot.model.addFrame(frame_l5)
+
+    # Re-generate robot data to include new frames
+    robot.data = pin.Data(robot.model)
+
+    # 3. Create the Barrier Task
+    # d_min is the sum of the radii of the two virtual spheres
+    self_collision_barrier = BodySphericalBarrier(
+        ("link2_barrier_frame", "link5_barrier_frame"),
+        d_min=0.10,      # Minimum distance in meters
+        gain=10.0,      # How "hard" the barrier pushes back
+    )
+    
+    return self_collision_barrier
+
+
 def init_robot(urdf_path: str = None, mesh_dirs: list = None, ee_frame: str = None):
     """Initialize the robot model and Pink configuration.
 
@@ -69,7 +123,7 @@ def init_robot(urdf_path: str = None, mesh_dirs: list = None, ee_frame: str = No
         mesh_dirs: List of directories to search for mesh packages (for local URDF).
         ee_frame: End effector frame name. If None, uses default based on URDF source.
     """
-    global robot, config, end_effector_task, END_EFFECTOR_FRAME
+    global robot, config, end_effector_task, posture_task_1, posture_task_2, posture_task_home, self_collision_barrier, END_EFFECTOR_FRAME
 
     if urdf_path is not None:
         # Load from local URDF file
@@ -103,8 +157,26 @@ def init_robot(urdf_path: str = None, mesh_dirs: list = None, ee_frame: str = No
     end_effector_task = FrameTask(
         END_EFFECTOR_FRAME,
         position_cost=1.0,
-        orientation_cost=1.0,
+        orientation_cost=0.7,
     )
+    
+    posture_task_1 = pink.tasks.PostureTask(
+        cost=1e-6,  # Keep this low so it doesn't fight the End Effector task
+    )
+    posture_task_1.set_target(GOOD_JOINT_POSITION_1)
+
+    posture_task_2 = pink.tasks.PostureTask(
+        cost=1e-6,  # Keep this low so it doesn't fight the End Effector task
+    )
+    posture_task_2.set_target(GOOD_JOINT_POSITION_2)
+
+    posture_task_home = pink.tasks.PostureTask(
+        cost=1e-6,  # Keep this low so it doesn't fight the End Effector task
+    )
+    posture_task_home.set_target(HOME_JOINT_POSITION)
+
+    # Setup self-collision barrier
+    self_collision_barrier = setup_collision_barrier(robot)
 
     print(f"Robot loaded. DOF: {robot.model.nq}")
     print(f"End effector frame: {END_EFFECTOR_FRAME}")
@@ -149,7 +221,7 @@ def solve_single_ik(position, orientation_quat, q_init=None, max_iters=1000, dt=
         success: Whether IK converged
         timing_stats: Dictionary with timing information
     """
-    global config, end_effector_task
+    global config, end_effector_task, posture_task_2, posture_task_home
 
     timing_stats = {}
     total_start = time.time()
@@ -177,10 +249,12 @@ def solve_single_ik(position, orientation_quat, q_init=None, max_iters=1000, dt=
     num_iters = 0
     for i in range(max_iters):
         num_iters = i + 1
+
         # Compute velocity
         velocity = solve_ik(
             config,
-            [end_effector_task],
+            # [end_effector_task],
+            [end_effector_task, posture_task_home],
             dt,
             solver="quadprog",
         )

@@ -1,5 +1,4 @@
-from diff_eval_utils.controllers.simple_controller import SimpleSequentialController, StatusMonitor
-from diff_eval_utils.diffusion_clients import DirectPolicyWrapper
+from diff_eval_utils.controllers.simple_controller import SimpleSequentialController
 from diff_eval_utils.diffusion_transforms import ten_d_action_to_pose, convert_action_from_fingertip_to_gripper
 import time
 import numpy as np
@@ -45,14 +44,13 @@ class InterventionController(SimpleSequentialController):
         # Policy state machine (inner layer)
         self.POLICY_MODE = 'policy'
         self.INTERVENTION_MODE = 'intervention'
-        self.PAUSE_MODE = 'pause'
         self.mode = self.POLICY_MODE
 
         # Spacemouse (initialized in run() using context manager)
         self.spacemouse = None
 
         # Keyboard listener state
-        self.key_commands = {'r': False, 'i': False, 'p': False}
+        self.key_commands = {'r': False, 'i': False}
         self.listener_lock = threading.Lock()
         self.keyboard_listener = None
 
@@ -71,9 +69,7 @@ class InterventionController(SimpleSequentialController):
         self.ACTION_SCALE = self.config.spacemouse_action_scale
         self.DEADZONE = self.config.spacemouse_deadzone
 
-        self.hand_n_interpolation = self.config.n_steps_per_unit_hand_action - 1
-        self.intv_n_interpolation = self.config.n_steps_per_unit_intv_action - 1
-        self.policy_n_interpolation = self.hand_n_interpolation
+        self.policy_n_interpolation = self.config.n_interpolation
         self.intervention_n_interpolation = self.config.teleop['n_interpolation']
 
         # Loop frequency tracking
@@ -95,10 +91,10 @@ class InterventionController(SimpleSequentialController):
                     if hasattr(key, 'char'):
                         if key.char == 'r':
                             self.key_commands['r'] = True
+                            print("\n[KEY: r] Recording toggle requested...")
                         elif key.char == 'i':
                             self.key_commands['i'] = True
-                        elif key.char == 'p':
-                            self.key_commands['p'] = True
+                            print("\n[KEY: i] Resume policy requested...")
                 except AttributeError:
                     pass
 
@@ -106,8 +102,7 @@ class InterventionController(SimpleSequentialController):
         self.keyboard_listener.start()
         print("Keyboard listener started:")
         print("  'r' - Toggle recording (ready <-> recording, with reset)")
-        print("  'i' - Resume policy from intervention/pause")
-        print("  'p' - Pause policy (hold position until 'i' pressed)")
+        print("  'i' - Resume policy from intervention")
 
     def _setup_intervention_publisher(self):
         """Create ROS2 publisher for intervention signals."""
@@ -170,7 +165,7 @@ class InterventionController(SimpleSequentialController):
         Returns:
             bool: True if intervention should be triggered
         """
-        return spacemouse.has_motion_occurred() or spacemouse.is_button_pressed(0)
+        return spacemouse.has_motion_occurred()
 
     def _check_key_command(self, key):
         """Check if a key command was triggered and reset flag.
@@ -245,6 +240,10 @@ class InterventionController(SimpleSequentialController):
         new_pos = self.intervention_target_pose.position
         new_orientation = self.intervention_target_pose.orientation
 
+
+        print(new_pos)
+        print(f"space mouse time sleep = {(time.time() - self.space_mouse_debug_t_start) * 1000}ms")
+
         if self.control_space == 'cartesian':
             self._execute_cartesian_action(new_pos, new_orientation)
         elif self.control_space == 'joint':
@@ -280,7 +279,6 @@ class InterventionController(SimpleSequentialController):
         if not has_movement and not gripper_toggle:
             self._publish_intervention_state(0)
             self._execute_spacemouse_action()
-            self.prev_button_pressed = button_pressed
             return
 
         # Publish intervention signals only when recording (for data collection)
@@ -324,9 +322,15 @@ class InterventionController(SimpleSequentialController):
         self._execute_spacemouse_action()
         # Update intervention target pose
 
+        # Only print if there's movement
+        if has_movement:
+            print(f"[INTERVENTION] x={new_pos[0]:.4f} y={new_pos[1]:.4f} z={new_pos[2]:.4f} "
+                  f"roll={new_euler[0]:.4f} pitch={new_euler[1]:.4f} yaw={new_euler[2]:.4f}")
+
         # Handle gripper using base controller's gripper execution pattern
         if gripper_toggle:
             new_gripper_value = 1.0 - self.prev_grasp_value
+            print(f"[GRIPPER] {'Closing' if new_gripper_value == 1.0 else 'Opening'} gripper...")
             self._execute_gripper_action(new_gripper_value)
 
         # Update button state for next iteration
@@ -337,20 +341,6 @@ class InterventionController(SimpleSequentialController):
 
     def _per_action(self):
         return super()._per_action()
-
-    def _policy_n_interpolation_from_obs(self, obs_dict):
-        if self.config.policy_action_freq_override == 'intv':
-            return self.intv_n_interpolation
-        if self.config.policy_action_freq_override == 'hand':
-            return self.hand_n_interpolation
-
-        if not self.predict_contact:
-            return self.hand_n_interpolation
-
-        is_intervention = bool(obs_dict.get('is_contact', np.array([False]))[0])
-        if is_intervention:
-            return self.intv_n_interpolation
-        return self.hand_n_interpolation
     
 
     def _execute_action(self, action, move_to=False):
@@ -392,6 +382,9 @@ class InterventionController(SimpleSequentialController):
 
         self.n_interpolation = self.policy_n_interpolation
 
+        print(f"self.n_interpolation: {self.n_interpolation}")
+
+        print(f"policy time sleep = {(time.time() - self.policy_debug_t_start) * 1000}ms")
         if self.control_space == 'cartesian':
             self._execute_cartesian_action(new_position, gripper_pose, move_to=move_to)
         elif self.control_space == 'joint':
@@ -446,10 +439,6 @@ class InterventionController(SimpleSequentialController):
         self._setup_keyboard_listener()
         self._setup_intervention_publisher()
 
-        monitor = StatusMonitor()
-        if not hasattr(self.policy_client, 'ckpt_path'):
-            monitor.start()
-
         policy_iter = 0  # Track policy iterations (for observation cycles)
 
         print("\n" + "="*60)
@@ -458,8 +447,7 @@ class InterventionController(SimpleSequentialController):
         print("Controls:")
         print("  'r' - Toggle recording (ready <-> recording, with reset)")
         print("  Spacemouse - Automatic intervention during recording")
-        print("  'p' - Pause policy (hold position until 'i')")
-        print("  'i' - Resume policy from intervention/pause")
+        print("  'i' - Resume policy from intervention")
         print("  Ctrl+C - Exit")
         print("="*60)
         print(f"\nInitial state: {self.recording_state}")
@@ -474,7 +462,6 @@ class InterventionController(SimpleSequentialController):
                 current_actions = None
                 action_idx = 0
                 self.intervention_target_pose = self.robot.end_effector_pose.copy()
-                monitor.update(intervention_state=f"{self.recording_state}/{self.mode}")
 
                 while True:
                     iter_start = time.time()
@@ -487,14 +474,6 @@ class InterventionController(SimpleSequentialController):
                         first = True
                         action_idx = 0
 
-                    # Check for 'p' key (pause policy)
-                    if self._check_key_command('p') and self.recording_state == self.RECORDING and self.mode == self.POLICY_MODE:
-                        self.mode = self.PAUSE_MODE
-                        self.intervention_target_pose = self.robot.end_effector_pose.copy()
-                        current_actions = None
-                        action_idx = 0
-                        monitor.update(paused=True, intervention_state=f"{self.recording_state}/{self.mode}")
-
                     recording = self.recording_state == self.RECORDING
 
                     # Execute policy/intervention only when RECORDING
@@ -502,98 +481,53 @@ class InterventionController(SimpleSequentialController):
                         if recording:
                         # STATE: POLICY_MODE
                             # Get new actions if needed
-                            # time.sleep(2)
                             self._update_buffer_sync()
                             # time.sleep(0)
                             self._publish_intervention_state(0)
-                            t_obs_start = time.time()
                             obs_dict = self._get_observation()
-                            self.policy_n_interpolation = self._policy_n_interpolation_from_obs(obs_dict)
-                            last_obs_time_ms = (time.time() - t_obs_start) * 1000
-
-                            t_inf_start = time.time()
+                            print(f"self._joint_exec_time: {self._joint_exec_time}")
                             actions_raw = self.policy_client.predict_action(obs_dict)
-                            last_inference_ms = (time.time() - t_inf_start) * 1000
-
-                            monitor.update(
-                                last_obs_time_ms=last_obs_time_ms,
-                                last_inference_ms=last_inference_ms,
-                                last_predict_action_ts=time.time(),
-                                intervention_state=f"{self.recording_state}/{self.mode}",
-                            )
-
                             current_actions = self._post_process_action(actions_raw[:self.config.action_exec_size])
-                            self.actions = current_actions
+
+                            for curr_pos, _, gripper in current_actions:
+                                print(curr_pos, gripper)
 
                             for action in current_actions:
                                 self._execute_action(action, move_to=False)
                                 action_idx += 1
-                                
-                                monitor.update(
-                                    intervention_state=f"{self.recording_state}/{self.mode}",
-                                    n_interpolation=self.n_interpolation,
-                                    ee_pos=np.array(self.robot.end_effector_pose.position),
-                                    ee_rot=self.robot.end_effector_pose.orientation,
-                                    gripper=self.prev_grasp_value,
-                                    gripper_qpos=1.0 - self.prev_grasp_value,
-                                )
-                                if self._need_intervention:
-                                    
-                                    break
+                                if self._check_for_intervention_trigger(sm) or (action[0][2] <= 0.14 and action[2] < 0.5):
+                                    print(f"\n{'='*60}")
+                                    print("[INTERVENTION TRIGGERED] Spacemouse movement detected! Switching Controller")
+                                    # time.sleep(1)
+                                    print(f"{'='*60}")
 
-                                if self._check_for_intervention_trigger(sm):
                                     self.mode = self.INTERVENTION_MODE
+                                    self.robot
+
                                     # Initialize intervention target from current pose
                                     self.intervention_target_pose = self.robot.end_effector_pose.copy()
                                     # Invalidate current actions (will get fresh observation on resume)
                                     current_actions = None
                                     action_idx = 0
-                                    monitor.update(intervention_state=f"{self.recording_state}/{self.mode}")
                                     break
 
-                                if self._check_key_command('p'):
-                                    self.mode = self.PAUSE_MODE
-                                    self.intervention_target_pose = self.robot.end_effector_pose.copy()
-                                    current_actions = None
-                                    action_idx = 0
-                                    monitor.update(paused=True, intervention_state=f"{self.recording_state}/{self.mode}")
-                                    break
-
+                            iter_total = time.time() - iter_start
+                            print(f"[RECORDING/POLICY] Action {action_idx}: {iter_total*1000:.1f} ms")
                             self._publish_intervention_state(0)
                             # time.sleep(0.25)
-
-                    # STATE: PAUSE_MODE — hold position, wait for 'i'
-                    if self.mode == self.PAUSE_MODE and recording:
-                        self._publish_intervention_state(0)
-                        if self._check_key_command('i'):
-                            self._last_joint_target = None
-                            self.mode = self.POLICY_MODE
-                            self._update_buffer_sync()
-                            self.target_pose = self.intervention_target_pose.copy()
-                            sm.clear_motion_flag()
-                            monitor.update(paused=False, intervention_state=f"{self.recording_state}/{self.mode}")
-                            continue
-                        else:
-                            time.sleep(0.05)  # Idle while paused
-                            continue
 
                     # STATE: INTERVENTION_MODE
                     if self.mode == self.INTERVENTION_MODE or not recording:
 
                         # Execute spacemouse control
                         self._execute_intervention_step(sm, recording=recording)
-                        monitor.update(
-                            intervention_state=f"{self.recording_state}/{self.mode}",
-                            n_interpolation=self.n_interpolation,
-                            ee_pos=np.array(self.robot.end_effector_pose.position),
-                            ee_rot=self.robot.end_effector_pose.orientation,
-                            gripper=self.prev_grasp_value,
-                            gripper_qpos=1.0 - self.prev_grasp_value,
-                        )
 
                         if recording:
                             # Check for resume request
                             if self._check_key_command('i'):
+                                print(f"\n{'='*60}")
+                                print("[RESUMING POLICY] Getting observation from current pose...")
+                                print(f"{'='*60}")
                                 self._last_joint_target = None
                                 self.mode = self.POLICY_MODE
                                 self._update_buffer_sync()
@@ -601,7 +535,6 @@ class InterventionController(SimpleSequentialController):
                                 self.target_pose = self.intervention_target_pose.copy()
                                 # Clear motion flag to avoid immediate re-intervention
                                 sm.clear_motion_flag()
-                                monitor.update(intervention_state=f"{self.recording_state}/{self.mode}")
                                 # Will get fresh observation on next iteration
                                 continue
 
@@ -611,5 +544,4 @@ class InterventionController(SimpleSequentialController):
         except KeyboardInterrupt:
             print("\n\nRecording stopped by user")
         finally:
-            monitor.stop()
             self._cleanup()

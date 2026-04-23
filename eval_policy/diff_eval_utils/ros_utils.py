@@ -2,12 +2,14 @@
 
 import numpy as np
 from sensor_msgs.msg import JointState
+from geometry_msgs.msg import WrenchStamped
+
 
 
 class JointStateSubscriber:
     """A simple ROS2 subscriber to get joint states from /joint_states topic."""
 
-    def __init__(self, node, topic: str = "/joint_states"):
+    def __init__(self, node, topic: str = "/joint_states", ft_sensor_on=False):
         """Initialize the joint state subscriber.
 
         Args:
@@ -18,8 +20,11 @@ class JointStateSubscriber:
         self._node = node
         self._franka_received = False
         self._robotiq_received = False
+        self._robotiq_torque_received = False
         self.franak_joint_array = None
+        self.ft_sensor_on = ft_sensor_on
         self.gripper_joint_array = None
+        self.gripper_torque_array = None
         self.gripper_width = 0.7894070484581498
         self.franka_joint_names = ["fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7"]
         self.gripper_joint_names = ['gripper_joint']
@@ -36,12 +41,32 @@ class JointStateSubscriber:
             self._robotiq_callback,
             10
         )
+        self._robotiq_torque_subscription = node.create_subscription(
+            WrenchStamped,
+            "/ft/robotiq_force_torque_sensor_broadcaster/wrench",
+            self._robotiq_torque_callback,
+            10
+        )
 
     def clear_cache(self):
         self._franka_received = False
         self._robotiq_received = False
+        self._robotiq_torque_received = False
         self.franak_joint_array = None
         self.gripper_joint_array = None
+        self.gripper_torque_array = None
+
+    def _robotiq_torque_callback(self, msg: WrenchStamped):
+        """Update gripper torque from the message."""
+        self.gripper_torque_array = np.array([
+            msg.wrench.force.x,
+            msg.wrench.force.y,
+            msg.wrench.force.z,
+            msg.wrench.torque.x,
+            msg.wrench.torque.y,
+            msg.wrench.torque.z
+        ], dtype=np.float32)
+        self._robotiq_torque_received = True
 
     def _franka_callback(self, msg: JointState):
         """Update joint positions from the message."""
@@ -84,6 +109,15 @@ class JointStateSubscriber:
         return np.round(self.gripper_joint_array)
 
     @property
+    def gripper_torque(self) -> np.ndarray:
+        """Get gripper torque values."""
+        return self.gripper_torque_array
+
+    @property
     def is_ready(self) -> bool:
         """Check if at least one message has been received."""
-        return self._franka_received and self._robotiq_received
+        print(f"{self.ft_sensor_on}\t{self._franka_received}\t{self._robotiq_received}\t{self._robotiq_torque_received}")
+        if not self.ft_sensor_on:
+            return self._franka_received and self._robotiq_received 
+        # print(f"self._franka_received:{self._franka_received}, self._robotiq_received:{self._robotiq_received} and self._robotiq_torque_received:{self._robotiq_torque_received}")
+        return self._franka_received and self._robotiq_received and self._robotiq_torque_received

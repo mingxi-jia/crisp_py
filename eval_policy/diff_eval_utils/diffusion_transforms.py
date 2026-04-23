@@ -123,7 +123,8 @@ def franka_obs_to_diff_obs(obs_buffer, img_policy=False, visualize=False):
         # Use latest frame only
         latest = frames[-1]
         pcd = latest['pcd']
-        ih_rgb_resized = process_rgb(latest['cam4_rgb'])
+        ih_rgb_resized = latest['cam4_rgb']
+        print(f"ih_rgb_resized.shape: {ih_rgb_resized.shape}")
         ih_depth = latest['cam4_depth']
 
         # Visualize for debugging
@@ -139,7 +140,7 @@ def franka_obs_to_diff_obs(obs_buffer, img_policy=False, visualize=False):
             'robot0_eef_pos': latest['eef_pos'],
             'robot0_eef_quat': latest['eef_quat'],
             'robot0_gripper_qpos': latest['gripper_qpos'],
-            'robot0_eye_in_hand_image': ih_rgb_resized.astype(np.float32),
+            'robot0_eye_in_hand_image': ih_rgb_resized.astype(np.uint8),
             'pcd': pcd,
             'robot0_eye_in_hand_depth': ih_depth.astype(np.float32),
             'robot0_joint_pos': latest['joint_pos'],

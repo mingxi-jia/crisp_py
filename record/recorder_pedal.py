@@ -7,7 +7,6 @@ import os
 import sys
 import queue
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -25,17 +24,21 @@ import message_filters
 from pynput import keyboard
 from scipy.spatial.transform import Rotation as R
 
+try:
+    from pedal_gui_driver import PedalListenerGUI
+except ImportError:
+    print("Error: Could not import PedalListenerGUI.", file=sys.stderr)
+    print("Ensure pedal_gui_driver.py is in the Python path or the same directory.", file=sys.stderr)
+    sys.exit(1)
+
 
 @dataclass
 class RecorderConfig:
     """Configuration for the frame recorder."""
     num_cameras: int = 4
     fps: int = 15
-    # output_dir: str = './raw_datasets/episodes'
-    # output_dir: str = '/mnt/c2b9de74-0cf1-492c-b46e-70d1bc9419fe/mingxi/XEMB/raw_datasets/episodes'
-    output_dir: str = '/media/mingxi/daaata1/zilai_data/pick_coffee_pod_cog/play/'
-    output_dir: str = '/media/mingxi/daaata1/duo_policy/data/raw_datasets/episodes'
     queue_size: int = 20
+    output_dir: str = '/mnt/c2b9de74-0cf1-492c-b46e-70d1bc9419fe/mingxi/XEMB/raw_datasets/episodes'
     sync_slop: float = 0.05  # 50ms max time difference for sync (increased for 4 cameras)
     rgb_encoding: str = 'bgr8'
     depth_encoding: str = 'passthrough'
@@ -44,9 +47,9 @@ class RecorderConfig:
     # Depth visualization range (in mm)
     depth_min_mm: float = 200.0
     depth_max_mm: float = 2000.0
-    # Keep recording briefly after gripper command / observed qpos changes.
-    gripper_record_hold_sec: float = 0.5
-    gripper_qpos_change_epsilon: float = 1e-4
+    # Foot pedal USB IDs
+    pedal_vendor_id: int = 0x3553
+    pedal_product_id: int = 0xb001
 
 
 @dataclass
@@ -60,8 +63,6 @@ class RecordingState:
     joint_states: list = field(default_factory=list)
     intervention_states: list = field(default_factory=list)
     gripper_torques: list = field(default_factory=list)
-    gripper_qpos: list = field(default_factory=list)
-    last_frame_time: Optional[float] = None  # Timestamp of last recorded frame
 
 
 class FrameRecorderNode(Node):
@@ -86,13 +87,10 @@ class FrameRecorderNode(Node):
 
         # Current sensor data (protected by data_lock)
         self.current_gripper_state = 0
-        self.current_gripper_qpos: Optional[float] = None
         self.current_eef_pose: Optional[np.ndarray] = None
         self.current_joint_state: Optional[np.ndarray] = None
         self.current_intervention_state = 0  # 0=idle, 1=policy, 2=intervention
         self.current_gripper_torque: Optional[np.ndarray] = None
-        self.has_teleop_command = False
-        self.gripper_record_until: float = 0.0
 
         # Build topic lists
         self.topics = self._build_topic_lists()
@@ -102,10 +100,24 @@ class FrameRecorderNode(Node):
         self._setup_subscriptions()
         self._start_keyboard_listener()
 
-        # Auto-start recording when cameras are ready
-        threading.Thread(target=self._wait_and_start_recording, daemon=True).start()
+        # Setup foot pedal
+        pedal_config = {
+            "VENDOR_ID": self.config.pedal_vendor_id,
+            "PRODUCT_ID": self.config.pedal_product_id,
+            "on_record_start_callback": self._handle_pedal_record_start,
+            "on_record_stop_callback": self._handle_pedal_record_stop,
+            "on_save_callback": self._handle_pedal_save,
+            "on_delete_callback": self._handle_pedal_delete,
+        }
+        self.pedal_listener = PedalListenerGUI(config=pedal_config, run_in_thread=True)
+        self.pedal_thread = threading.Thread(target=self._run_pedal_listener, daemon=True)
+        self.pedal_thread.start()
+
+        # Wait for cameras to be ready (no auto-start; pedal controls recording)
+        threading.Thread(target=self._wait_for_cameras, daemon=True).start()
 
         self.get_logger().info(f"Recorder initialized: {self.config.num_cameras} cameras, output={self.config.output_dir}")
+        self.get_logger().info("Press foot pedal to start/stop recording.")
 
     def _build_topic_lists(self) -> dict:
         """Build topic name lists for all cameras."""
@@ -143,7 +155,6 @@ class FrameRecorderNode(Node):
         self.create_subscription(PoseStamped, '/current_pose', self._on_eef_pose, 10)
         self.create_subscription(JointState, '/joint_states', self._on_joint_states, 10)
         self.create_subscription(Float64MultiArray, '/gripper/gripper_position_controller/commands', self._on_gripper_command, 10)
-        self.create_subscription(JointState, '/gripper/gripper_state', self._on_gripper_state, 10)
         self.create_subscription(WrenchStamped, '/ft/robotiq_force_torque_sensor_broadcaster/wrench', self._on_gripper_torque, 10)
         self.create_subscription(Int32MultiArray, '/teleop/signals', self._on_teleop_signal, 10)
 
@@ -200,23 +211,7 @@ class FrameRecorderNode(Node):
         """Handle gripper command message."""
         gripper_state = int(msg.data[0]) if msg.data else 0
         with self.data_lock:
-            if gripper_state != self.current_gripper_state:
-                self.gripper_record_until = time.time() + self.config.gripper_record_hold_sec
             self.current_gripper_state = gripper_state
-
-    def _on_gripper_state(self, msg: JointState):
-        """Handle gripper state message (raw qpos from /gripper/gripper_state)."""
-        for i, name in enumerate(msg.name):
-            if name == 'gripper_joint':
-                with self.data_lock:
-                    new_qpos = float(msg.position[i])
-                    if (
-                        self.current_gripper_qpos is None or
-                        abs(new_qpos - self.current_gripper_qpos) >= self.config.gripper_qpos_change_epsilon
-                    ):
-                        self.gripper_record_until = time.time() + self.config.gripper_record_hold_sec
-                    self.current_gripper_qpos = new_qpos
-                break
 
     def _on_gripper_torque(self, msg: WrenchStamped):
         """Handle gripper torque message."""
@@ -240,23 +235,14 @@ class FrameRecorderNode(Node):
         if len(msg.data) < 9:
             return
 
-        # Extract intervention state from first element
-        intervention_state = msg.data[0]
-
         # Skip if reset is pressed (index 8)
         if msg.data[8]:
             return
 
-        # Record if state is 1 (policy) or 2 (intervention)
+        intervention_state = msg.data[0]
         if intervention_state in [1, 2]:
             with self.data_lock:
                 self.current_intervention_state = intervention_state
-                self.has_teleop_command = True
-        else:
-            with self.data_lock:
-                self.has_teleop_command = False
-
-        print("self.current_intervention_state: ", self.current_intervention_state)
 
     def _on_synchronized_images(self, *msgs):
         """Handle synchronized image bundle from all cameras."""
@@ -273,58 +259,65 @@ class FrameRecorderNode(Node):
 
         # Get current state snapshot
         with self.data_lock:
-            has_teleop = self.has_teleop_command
             gripper = self.current_gripper_state
             eef_pose = self.current_eef_pose.copy() if self.current_eef_pose is not None else None
             joint_state = self.current_joint_state.copy() if self.current_joint_state is not None else None
             intervention_state = self.current_intervention_state
             gripper_torque = self.current_gripper_torque.copy() if self.current_gripper_torque is not None else None
-            gripper_qpos = self.current_gripper_qpos
-            gripper_record_until = self.gripper_record_until
 
-        print(f"Intervention state: {self.current_intervention_state}")
-
-        current_time = msgs[0].header.stamp.sec + msgs[0].header.stamp.nanosec * 1e-9
-        should_record = has_teleop or (time.time() <= gripper_record_until)
-
-        # Record while teleop is active, or during the short gripper hold window.
-        if not should_record:
-            print('idle, not started or inferencing')
-            return
-
-        # FPS enforcement: Check if enough time has elapsed since last frame
-        min_interval = 1.0 / self.config.fps  # e.g., 0.2 seconds for 5 FPS
-
-        if self.state.last_frame_time is not None:
-            time_since_last = current_time - self.state.last_frame_time
-            if time_since_last < min_interval:
-                # Too soon, skip this frame
-                return
-
-        # Update last frame time
-        self.state.last_frame_time = current_time
-
-        self.get_logger().info("Synchronized bundle received, recording frame.")
+        self.get_logger().info("Synchronized bundle received with teleop command, recording frame.")
 
         try:
-            self.frame_queue.put_nowait((msgs, gripper, eef_pose, joint_state, intervention_state, gripper_torque, gripper_qpos))
+            self.frame_queue.put_nowait((msgs, gripper, eef_pose, joint_state, intervention_state, gripper_torque))
         except queue.Full:
             self.state.dropped_bundle_count += 1
             if self.state.dropped_bundle_count % 100 == 0:
                 self.get_logger().warn(f"Queue full, dropped {self.state.dropped_bundle_count} bundles")
 
-        # Reset this to False to avoid image flooding 
-        self.has_teleop_command = False
-
     # --- Recording Control ---
 
-    def _wait_and_start_recording(self):
-        """Wait for all camera info, then auto-start recording."""
+    def _wait_for_cameras(self):
+        """Wait for all camera info to be received."""
         for event in self.camera_info_events:
             event.wait()
         self.all_cameras_ready.set()
-        self.get_logger().info("All cameras ready. Auto-starting recording...")
+        self.get_logger().info("All cameras ready. Press foot pedal to start recording.")
+
+    def _run_pedal_listener(self):
+        """Run the pedal listener in a thread."""
+        self.get_logger().info("Starting pedal listener thread...")
+        try:
+            self.pedal_listener.start()
+        except Exception as e:
+            self.get_logger().error(f"Pedal listener thread crashed: {e}")
+        finally:
+            self.get_logger().info("Pedal listener thread finished.")
+
+    def _handle_pedal_record_start(self):
+        """Pedal callback: start a new recording episode."""
         self._start_recording()
+
+    def _handle_pedal_record_stop(self):
+        """Pedal callback: stop current recording and save episode."""
+        self._stop_recording()
+
+    def _handle_pedal_save(self):
+        """Pedal callback: stop and finalize the current episode."""
+        if self.state.is_recording:
+            self._stop_recording()
+        self.get_logger().info(f"Episode saved: {self.state.current_episode_path}")
+
+    def _handle_pedal_delete(self):
+        """Pedal callback: stop recording and delete the current episode."""
+        if self.state.is_recording:
+            self.state.is_recording = False
+            self._stop_writer_thread()
+        episode_path = self.state.current_episode_path
+        if episode_path and os.path.exists(episode_path):
+            import shutil
+            shutil.rmtree(episode_path)
+            self.get_logger().info(f"Deleted episode: {episode_path}")
+            self.state.current_episode_path = None
 
     def _start_recording(self):
         """Start a new recording episode."""
@@ -354,14 +347,10 @@ class FrameRecorderNode(Node):
             self.state.eef_poses = []
             self.state.joint_states = []
             self.state.intervention_states = []
-            self.state.gripper_qpos = []
-            self.state.last_frame_time = None  # Reset FPS timer
             self._clear_queue()
 
             with self.data_lock:
-                self.has_teleop_command = False
                 self.current_intervention_state = 0
-                self.gripper_record_until = 0.0
 
             # Start writer thread
             self.writer_running.set()
@@ -438,16 +427,15 @@ class FrameRecorderNode(Node):
             except queue.Empty:
                 continue
 
-            msgs, gripper, eef_pose, joint_state, intervention_state, gripper_torque, gripper_qpos = bundle
+            msgs, gripper, eef_pose, joint_state, intervention_state, gripper_torque = bundle
 
             # Track state for this frame
             self.state.gripper_states.append(1 - gripper)  # Invert gripper state
             self.state.eef_poses.append(eef_pose)
             self.state.joint_states.append(joint_state)
             # Convert intervention state: 2 -> 1 (intervention), 1 -> 0 (policy)
-            self.state.intervention_states.append(1 if intervention_state == 2 else 0)
+            self.state.intervention_states.append(1)
             self.state.gripper_torques.append(gripper_torque)
-            self.state.gripper_qpos.append(gripper_qpos)
 
 
             # Save images for each camera
@@ -572,9 +560,6 @@ class FrameRecorderNode(Node):
         self._save_numpy_array(
             self.state.gripper_torques, state_path, 'ft_sensor.npy', np.float32, "gripper torques"
         )
-        self._save_numpy_array(
-            self.state.gripper_qpos, state_path, 'gripper_qpos.npy', np.float32, "gripper qpos"
-        )
 
     def _save_numpy_array(self, data_list: list, path: str, filename: str, dtype, name: str):
         """Save a list of data as numpy array."""
@@ -597,7 +582,7 @@ class FrameRecorderNode(Node):
         """Start keyboard listener for recording control."""
         self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
         self.keyboard_listener.start()
-        self.get_logger().info("Press 'r' to save current episode and start next one")
+        self.get_logger().info("Keyboard: 'r' = save episode and start next | 'f' = mark bad quality")
 
     def _on_key_press(self, key):
         """Handle keyboard press events."""
@@ -665,6 +650,9 @@ class FrameRecorderNode(Node):
 
         if hasattr(self, 'keyboard_listener') and self.keyboard_listener:
             self.keyboard_listener.stop()
+
+        if hasattr(self, 'pedal_listener') and self.pedal_listener:
+            self.pedal_listener.stop()
 
         self.state.is_recording = False
         self._stop_writer_thread()

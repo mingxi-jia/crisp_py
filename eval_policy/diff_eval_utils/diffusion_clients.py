@@ -8,6 +8,7 @@ import time
 import torch
 import dill
 import hydra
+from omegaconf import OmegaConf
 
 sys.path.append('/home/mingxi/mingxi_ws/handpi/diffusion_policy')
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
@@ -365,21 +366,39 @@ class DirectPolicyWrapper:
         print(f"Loading policy directly from {self.ckpt_path}")
         payload = torch.load(open(self.ckpt_path, 'rb'), pickle_module=dill)
         cfg = payload['cfg']
+
+        if 'task_name' not in cfg.policy:
+            OmegaConf.set_struct(cfg.policy, False)
+            cfg.policy.task_name = "realworld"
+            OmegaConf.set_struct(cfg.policy, True)
+        # Force is_simulation=False for real-robot evaluation
+        OmegaConf.set_struct(cfg.policy, False)
+        cfg.policy.is_simulation = False
+        OmegaConf.set_struct(cfg.policy, True)
+
         cfg.logging.resume = False
         cfg.logging.mode = 'offline'
-        cfg.real_robot_eval = True
+        if hasattr(cfg, 'real_robot_eval'):
+            cfg.real_robot_eval = True
+        if hasattr(cfg, 'policy'):
+            if hasattr(cfg.policy, 'predict_contact'):
+                delattr(cfg.policy, 'predict_contact')
+            if hasattr(cfg.policy, 'control_mode'):
+                delattr(cfg.policy, 'control_mode')
 
         cls = hydra.utils.get_class(cfg._target_)
-        workspace = cls(cfg)
+        workspace = cls(cfg, real_robot_eval=True)
         workspace.load_payload(payload, exclude_keys=None, include_keys=None)
 
-        self.policy = workspace.model
+        self.policy = workspace.ema_model
         self.device = torch.device('cuda')
         self.policy.eval()
         self.policy.to(self.device)
         self.policy.num_inference_steps = 20
-        self.policy.n_action_steps = 16
+        self.policy.n_action_steps = 8
         self.policy.reset()
+
+        self.predict_contact = True
 
         print("Policy initialized successfully (direct mode)")
 
@@ -411,6 +430,14 @@ class DirectPolicyWrapper:
             action = result['action'][0].detach().to('cpu').numpy()
 
         return action
+    
+    def predict_intervention(self, obs_dict: dict):
+        with torch.no_grad():
+            obs_dict_torch = dict_apply(obs_dict,
+                    lambda x: torch.from_numpy(x[None, None, ...].copy()).to(self.device))
+            result = self.policy.predict_intervention(obs_dict_torch)
+            intv = result.to('cpu').numpy()[0]
+            return intv, None
 
     def reset(self):
         """Reset the policy."""

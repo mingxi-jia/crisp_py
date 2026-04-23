@@ -7,9 +7,9 @@ import sys
 toolbox_path = '/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool'
 sys.path.append(toolbox_path)
 from robot_filter.arm_segmentor import RobotArmSegmentation
-from hand_tool.trajectory_loader import ObservationProcessor
+# from hand_tool.trajectory_loader import ObservationProcessor
 
-obs_processor = ObservationProcessor()
+# obs_processor = ObservationProcessor()
 
 def visualize_pcd(pcd: np.ndarray, robot_pcd=None):
     """Visualize point cloud using Open3D.

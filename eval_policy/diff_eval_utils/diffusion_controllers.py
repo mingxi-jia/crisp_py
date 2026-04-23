@@ -10,13 +10,15 @@ from diff_eval_utils.controllers.blending_controller import BlendingChunkingCont
 from diff_eval_utils.controllers.gello_controller import GelloController
 from diff_eval_utils.controllers.test_controller import TestController
 from diff_eval_utils.controllers.test_teleop_controller import TestTeleopController
+from diff_eval_utils.controllers.intervention_party_host_controller import InterventionController as InterventionPartyHostController
+from diff_eval_utils.controllers.teleop_intv_controller import TeleopIntvController
 
 
 def create_controller(mode: str, *args, **kwargs) -> RobotController:
     """Factory function to create controller based on mode.
 
     Args:
-        mode: Controller mode ('simple', 'chunking', 'blending', 'intv', 'controlnet', 'teleop', 'gello', 'test')
+        mode: Controller mode ('simple', 'chunking', 'blending', 'intv', 'intv_party', 'controlnet', 'teleop', 'teleop_intv', 'gello', 'test')
         *args, **kwargs: Arguments passed to controller constructor
 
     Returns:
@@ -34,11 +36,15 @@ def create_controller(mode: str, *args, **kwargs) -> RobotController:
         return ControlNetController(*args, **kwargs)
     elif mode == 'teleop':
         return TeleopController(*args, **kwargs)
+    elif mode == 'teleop_intv':
+        return TeleopIntvController(*args, **kwargs)
     elif mode == 'gello':
         return GelloController(*args, **kwargs)
     elif mode == 'test':
         return TestController(*args, **kwargs)
     elif mode == 'test_teleop':
         return TestTeleopController(*args, **kwargs)
+    elif mode == 'intv_party':
+        return InterventionPartyHostController(*args, **kwargs)
     else:
         raise ValueError(f"Unknown controller mode: {mode}")
