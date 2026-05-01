@@ -9,7 +9,8 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, JointState
+from geometry_msgs.msg import WrenchStamped
 from cv_bridge import CvBridge
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from scipy.spatial.transform import Rotation
@@ -43,32 +44,33 @@ class PointCloudManager(Node):
             t = np.array(self.cam_params[cam_name]["t"])
             self.transforms[cam_name] = (R, t)
 
-        # QoS profile for best effort, low latency
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=1
+            depth=10,
         )
 
         # Subscribe to RGB and depth topics
         self.rgb_subs = []
         self.depth_subs = []
-        
-        for i in [1, 2, 3]:
-            rgb_sub = Subscriber(self, Image, f"/cam{i}/color/image_raw", qos_profile=qos)
-            depth_sub = Subscriber(self, Image, f"/cam{i}/aligned_depth_to_color/image_raw", qos_profile=qos)
+        self._external_cams = [3]
+        self._name2idx = {f"cam{i}": k for k, i in enumerate(self._external_cams)}
+
+        for i in self._external_cams:
+            rgb_sub = Subscriber(self, Image, f"/cam{i}/cam{i}/color/image_raw", qos_profile=qos)
+            depth_sub = Subscriber(self, Image, f"/cam{i}/cam{i}/aligned_depth_to_color/image_raw", qos_profile=qos)
             self.rgb_subs.append(rgb_sub)
             self.depth_subs.append(depth_sub)
 
-        self.inhand_rgb_sub = Subscriber(self, Image, f"/cam4/color/image_rect_raw", qos_profile=qos)
-        self.inhand_depth_sub = Subscriber(self, Image, f"/cam4/aligned_depth_to_color/image_raw", qos_profile=qos)
+        self.inhand_rgb_sub = Subscriber(self, Image, f"/cam4/cam4/color/image_rect_raw", qos_profile=qos)
+        self.inhand_depth_sub = Subscriber(self, Image, f"/cam4/cam4/aligned_depth_to_color/image_raw", qos_profile=qos)
         self.inhand_sub = [self.inhand_rgb_sub, self.inhand_depth_sub]
 
         # Synchronize all 6 topics with larger queue and more lenient timing
         all_subs = self.rgb_subs + self.depth_subs + self.inhand_sub
         self.sync = ApproximateTimeSynchronizer(
-            all_subs, queue_size=100, slop=1/fps
+            all_subs, queue_size=100, slop=0.5
         )
         self.sync.registerCallback(self.sync_callback)
 
@@ -127,18 +129,19 @@ class PointCloudManager(Node):
         # Apply transformation: p_world = R * p_cam + t
         return (R @ points.T).T + t
 
-    def sync_callback(self, rgb1, rgb2, rgb3, depth1, depth2, depth3, inhand_rgb, inhand_depth):
+    def sync_callback(self, rgb3, depth3, inhand_rgb, inhand_depth):
         """Process synchronized RGB-D images from all cameras."""
+        if self.callback_count % 30 == 0:
+            print(f"[sync_callback] fired (count={self.callback_count})", flush=True)
         try:
-            # print("Received synchronized images")
             # Convert ROS images to numpy
             self.rgb_images = [
                 self.bridge.imgmsg_to_cv2(img, "rgb8")
-                for img in [rgb1, rgb2, rgb3]
+                for img in [rgb3]
             ]
             self.depth_images = [
                 self.bridge.imgmsg_to_cv2(img, "16UC1")
-                for img in [depth1, depth2, depth3]
+                for img in [depth3]
             ]
             self.inhand_image = self.bridge.imgmsg_to_cv2(inhand_rgb, "rgb8")
             self.inhand_depth = self.bridge.imgmsg_to_cv2(inhand_depth, "16UC1")/1000.0
@@ -189,19 +192,24 @@ class PointCloudManager(Node):
         latest_pcd = np.concatenate([merged_points, merged_colors], axis=1)
         return latest_pcd
 
-    def get_latest_rgbd(self, cam_name: str):
+    def get_latest_rgbd(self, cam_name: str, timeout: float = 5.0):
         """Return the latest RGB image from specified camera."""
+        deadline = time.time() + timeout
         if cam_name == "cam4":
             while (self.inhand_image is None) or (self.inhand_depth is None):
-                time.sleep(0.01)  # Wait for first callback
-                # print("No in-hand RGB image received yet.")
+                if time.time() > deadline:
+                    print(f"[get_latest_rgbd] TIMEOUT cam4 after {timeout}s — sync_callback never fired")
+                    return None, None
+                time.sleep(0.01)
             return self.inhand_image, self.inhand_depth
         else:
             while self.rgb_images == [] or self.depth_images == []:
-                time.sleep(0.01)  # Wait for first callback
-                # print("No RGB image received yet.")
-            name2idx = {"cam1": 0, "cam2": 1, "cam3": 2}
-            return self.rgb_images[name2idx[cam_name]], self.depth_images[name2idx[cam_name]]
+                if time.time() > deadline:
+                    print(f"[get_latest_rgbd] TIMEOUT {cam_name} after {timeout}s — sync_callback never fired")
+                    return None, None
+                time.sleep(0.01)
+            idx = self._name2idx[cam_name]
+            return self.rgb_images[idx], self.depth_images[idx]
 
     def clear_cache(self):
         """Clear stored images to free memory."""
@@ -209,71 +217,311 @@ class PointCloudManager(Node):
         self.depth_images = []
         self.inhand_image = None
         self.inhand_depth = None
+
+
+class ObservationManager(PointCloudManager):
+    """Unified observation node: cameras + joint states + gripper + (optional) FT.
+
+    Adds /joint_states, /gripper/gripper_state, and /ft/.../wrench subscriptions to
+    the same ROS node so a single executor spin yields the complete observation.
+    Pass `robot` and `gripper` (crisp_py.robot.Robot / crisp_py.gripper.Gripper) so
+    EE pose and gripper command value are reachable via a single get_obs() call.
+    """
+
+    FRANKA_JOINTS = [
+        "fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4",
+        "fr3_joint5", "fr3_joint6", "fr3_joint7",
+    ]
+    GRIPPER_JOINTS = ["gripper_joint"]
+
+    def __init__(self,
+                 config_path: str,
+                 robot=None,
+                 gripper=None,
+                 ft_sensor_on: bool = False,
+                 downsample: int = 2):
+        super().__init__(config_path, downsample=downsample)
+        self.robot = robot
+        self.gripper = gripper
+        self.ft_sensor_on = ft_sensor_on
+
+        self._franka_received = False
+        self._gripper_received = False
+        self._ft_received = False
+
+        self.franka_joint_array = None
+        self.gripper_joint_array = None
+        self.gripper_torque_array = None
+
+        self.create_subscription(JointState, "/joint_states", self._franka_cb, 10)
+        self.create_subscription(JointState, "/gripper/gripper_state", self._gripper_cb, 10)
+        self.create_subscription(WrenchStamped,
+                                 "/ft/robotiq_force_torque_sensor_broadcaster/wrench",
+                                 self._ft_cb, 10)
+
+    def _franka_cb(self, msg: JointState):
+        arr = [p for n, p in zip(msg.name, msg.position) if n in self.FRANKA_JOINTS]
+        if arr:
+            self.franka_joint_array = np.asarray(arr, dtype=np.float32)
+            self._franka_received = True
+
+    def _gripper_cb(self, msg: JointState):
+        arr = []
+        for n, p in zip(msg.name, msg.position):
+            if n in self.GRIPPER_JOINTS:
+                arr.append(1.0 if p >= 0.95 else 0.0)
+        if arr:
+            self.gripper_joint_array = np.asarray(arr, dtype=np.float32)
+            self._gripper_received = True
+
+    def _ft_cb(self, msg: WrenchStamped):
+        w = msg.wrench
+        self.gripper_torque_array = np.asarray(
+            [w.force.x, w.force.y, w.force.z,
+             w.torque.x, w.torque.y, w.torque.z], dtype=np.float32)
+        self._ft_received = True
+
+    @property
+    def is_ready(self) -> bool:
+        if self.ft_sensor_on:
+            return self._franka_received and self._gripper_received and self._ft_received
+        return self._franka_received and self._gripper_received
+
+    def get_obs(self, timeout: float = 5.0) -> dict:
+        """Return a complete observation dict (raw numpy arrays, no encoding)."""
+        deadline = time.time() + timeout
+        while (self.rgb_images == [] or self.depth_images == []
+               or self.inhand_image is None or self.inhand_depth is None):
+            if time.time() > deadline:
+                raise TimeoutError("Camera frames not received within timeout")
+            time.sleep(0.005)
+
+        rgb_list = [np.asarray(img) for img in self.rgb_images]
+        depth_list = [np.asarray(img) for img in self.depth_images]
+        inhand_rgb = np.asarray(self.inhand_image)
+        inhand_depth = np.asarray(self.inhand_depth)
+
+        ee_position = ee_quat_xyzw = joint_values = None
+        if self.robot is not None:
+            ee = self.robot.end_effector_pose
+            ee_position = np.asarray(ee.position, dtype=np.float32)
+            ee_quat_xyzw = ee.orientation.as_quat().astype(np.float32)
+            joint_values = np.asarray(self.robot.joint_values, dtype=np.float32)
+
+        gripper_value = None
+        if self.gripper is not None and self.gripper.value is not None:
+            gripper_value = float(self.gripper.value)
+
+        return {
+            "timestamp": time.time(),
+            "rgb": rgb_list,
+            "depth": depth_list,
+            "inhand_rgb": inhand_rgb,
+            "inhand_depth": inhand_depth,
+            "joint_values": joint_values,
+            "ee_position": ee_position,
+            "ee_quat_xyzw": ee_quat_xyzw,
+            "gripper_value": gripper_value,
+            "gripper_state": self.gripper_joint_array,
+            "ft_wrench": self.gripper_torque_array,
+        }
 # %%
-def main():
-    """Test the PointCloudManager."""
+DEFAULT_CONFIG_PATH = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/robot_configs/camera_info.yaml"
+
+
+def _summarize(name, arr):
+    if arr is None:
+        return f"  {name}: None"
+    if isinstance(arr, np.ndarray):
+        flat = arr.flatten()
+        head = np.array2string(flat[:6], precision=3, suppress_small=True)
+        return f"  {name}: shape={arr.shape} dtype={arr.dtype} head={head}"
+    return f"  {name}: {arr}"
+
+
+def test_pointcloud_manager(duration: float = 10.0,
+                            config_path: str = DEFAULT_CONFIG_PATH):
+    """Measure get_latest_rgbd rate for cam3 (cameras only)."""
     rclpy.init()
+    manager = PointCloudManager(config_path, downsample=2)
 
-    # Get config path
-    config_path = "/home/mingxi/mingxi_ws/handpi/diffusion_policy/robotool/robot_configs/camera_info.yaml"
-
-    # Create manager with downsampling for faster processing
-    manager = PointCloudManager(str(config_path), downsample=2)
-
-    # Spin in background thread to receive messages
     import threading
-    spin_thread = threading.Thread(target=rclpy.spin, args=(manager,), daemon=True)
-    spin_thread.start()
+    threading.Thread(target=rclpy.spin, args=(manager,), daemon=True).start()
 
-    # Rate tracking
-    last_pcd = None
-    last_update_time = None
     update_times = []
-    max_samples = 100
-    check_count = 0
-    start_time = time.time()
-    duration = 10.0  # Run for 10 seconds
-
-    # Wait and measure rate
-    print("Measuring point cloud rate...")
-    while time.time() - start_time < duration:
-        time.sleep(0.01)  # Poll at 100 Hz
-        pcd = manager.get_latest_pointcloud()
-        check_count += 1
-
-        # Track rate when new point cloud arrives
-        if pcd is not None:
-            current_time = time.time()
+    last_update_time = None
+    start = time.time()
+    test_cam = "cam3"
+    print(f"Measuring get_latest_rgbd rate for {test_cam}...")
+    while time.time() - start < duration:
+        time.sleep(0.01)
+        rgb, depth = manager.get_latest_rgbd(test_cam)
+        if rgb is not None and depth is not None:
+            now = time.time()
             if last_update_time is not None:
-                dt = current_time - last_update_time
-                update_times.append(dt)
-                if len(update_times) > max_samples:
-                    update_times.pop(0)
-
-                # Print every 15 updates (approximately once per second at 15 Hz)
+                update_times.append(now - last_update_time)
                 if len(update_times) % 15 == 0:
-                    avg_dt = np.mean(update_times[-30:])  # Use last 30 samples
-                    rate = 1.0 / avg_dt if avg_dt > 0 else 0
-                    print(f"Rate: {rate:.2f} Hz | Points: {len(pcd)} | Updates: {len(update_times)}")
-        
-            last_update_time = current_time
-            last_pcd = pcd
+                    rate = 1.0 / np.mean(update_times[-30:])
+                    print(f"Rate: {rate:.2f} Hz | RGB: {rgb.shape} | Depth: {depth.shape}")
+            last_update_time = now
         manager.clear_cache()
 
-    # Final stats
     if update_times:
-        avg_rate = 1.0 / np.mean(update_times)
-        print(f"\n=== Final Stats ===")
-        print(f"Total updates: {len(update_times)}")
-        print(f"Average rate: {avg_rate:.2f} Hz")
-        print(f"Min interval: {min(update_times):.3f} s ({1.0/min(update_times):.1f} Hz)")
-        print(f"Max interval: {max(update_times):.3f} s ({1.0/max(update_times):.1f} Hz)")
-    else:
-        print("No point clouds received!")
+        print(f"Average rate: {1.0/np.mean(update_times):.2f} Hz over {len(update_times)} updates")
+    try:
+        manager.destroy_node()
+    except Exception:
+        pass
+    if rclpy.ok():
+        rclpy.shutdown()
 
-    # Cleanup
-    manager.destroy_node()
-    rclpy.shutdown()
+
+def test_observation_manager(duration: float = 10.0,
+                             config_path: str = DEFAULT_CONFIG_PATH,
+                             with_robot: bool = False,
+                             ft_sensor_on: bool = False):
+    """Validate ObservationManager: cameras + joint_states + gripper + (optional) FT and Robot/Gripper."""
+    rclpy.init()
+
+    robot = None
+    gripper = None
+    if with_robot:
+        # Lazy imports — these pull in the full crisp_py control stack
+        from crisp_py.gripper.gripper import Gripper, GripperConfig
+        from crisp_py.robot import Robot
+        from crisp_py.robot_config import FrankaConfig
+
+        print("[test] Initializing Gripper...")
+        gripper = Gripper(gripper_config=GripperConfig.from_yaml("./config/gripper_robotiq.yaml"))
+        gripper.wait_until_ready()
+        print("[test] Initializing Robot...")
+        robot = Robot(namespace="", robot_config=FrankaConfig())
+        robot.wait_until_ready()
+
+    print("[test] Constructing ObservationManager...")
+    manager = ObservationManager(
+        config_path,
+        robot=robot,
+        gripper=gripper,
+        ft_sensor_on=ft_sensor_on,
+        downsample=2,
+    )
+
+    import threading
+    threading.Thread(target=rclpy.spin, args=(manager,), daemon=True).start()
+
+    print("[test] Waiting for joint_states + gripper_state (is_ready)...")
+    deadline = time.time() + 15.0
+    while not manager.is_ready:
+        if time.time() > deadline:
+            print("[test] WARNING: is_ready not reached in 15s — check that /joint_states and /gripper/gripper_state are publishing")
+            break
+        time.sleep(0.1)
+    print(f"[test] is_ready={manager.is_ready}")
+
+    expected_keys = {
+        "timestamp", "rgb", "depth", "inhand_rgb", "inhand_depth",
+        "joint_values", "ee_position", "ee_quat_xyzw",
+        "gripper_value", "gripper_state", "ft_wrench",
+    }
+    expected_non_none = {"rgb", "depth", "inhand_rgb", "inhand_depth", "gripper_state"}
+    if with_robot:
+        expected_non_none |= {"joint_values", "ee_position", "ee_quat_xyzw", "gripper_value"}
+    if ft_sensor_on:
+        expected_non_none.add("ft_wrench")
+
+    update_times = []
+    last_t = None
+    n_obs = 0
+    start = time.time()
+    print(f"[test] Polling get_obs() for {duration:.1f}s...")
+    while time.time() - start < duration:
+        try:
+            obs = manager.get_obs(timeout=2.0)
+        except TimeoutError as e:
+            print(f"[test] {e}")
+            manager.clear_cache()
+            continue
+
+        # Schema check on the first obs
+        if n_obs == 0:
+            missing = expected_keys - set(obs.keys())
+            assert not missing, f"obs missing keys: {missing}"
+            none_fields = {k for k in expected_non_none if obs.get(k) is None
+                           or (isinstance(obs.get(k), list) and len(obs[k]) == 0)}
+            if none_fields:
+                print(f"[test] WARNING: expected non-None but got None for: {sorted(none_fields)}")
+            print("[test] First obs:")
+            print(f"  timestamp: {obs['timestamp']:.3f}")
+            for i, (rgb, depth) in enumerate(zip(obs["rgb"], obs["depth"])):
+                print(_summarize(f"rgb[{i}]", rgb))
+                print(_summarize(f"depth[{i}]", depth))
+            print(_summarize("inhand_rgb", obs["inhand_rgb"]))
+            print(_summarize("inhand_depth", obs["inhand_depth"]))
+            print(_summarize("joint_values", obs["joint_values"]))
+            print(_summarize("ee_position", obs["ee_position"]))
+            print(_summarize("ee_quat_xyzw", obs["ee_quat_xyzw"]))
+            print(f"  gripper_value: {obs['gripper_value']}")
+            print(_summarize("gripper_state", obs["gripper_state"]))
+            print(_summarize("ft_wrench", obs["ft_wrench"]))
+
+        n_obs += 1
+        now = time.time()
+        if last_t is not None:
+            update_times.append(now - last_t)
+            if len(update_times) % 15 == 0:
+                rate = 1.0 / np.mean(update_times[-30:])
+                jv = obs["joint_values"]
+                ee = obs["ee_position"]
+                print(f"[obs #{n_obs}] {rate:.2f} Hz | "
+                      f"joint_values={'set' if jv is not None else 'None'} | "
+                      f"ee={'set' if ee is not None else 'None'} | "
+                      f"gripper_state={obs['gripper_state']}")
+        last_t = now
+        manager.clear_cache()
+
+    print("\n=== Summary ===")
+    print(f"Total observations: {n_obs}")
+    if update_times:
+        print(f"Average rate: {1.0/np.mean(update_times):.2f} Hz")
+        print(f"Min/Max interval: {min(update_times):.3f}s / {max(update_times):.3f}s")
+    else:
+        print("No observations received!")
+
+    if with_robot and robot is not None:
+        try:
+            robot.shutdown()
+        except Exception:
+            pass
+    try:
+        manager.destroy_node()
+    except Exception:
+        pass
+    if rclpy.ok():
+        rclpy.shutdown()
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="PointCloud / Observation manager tests")
+    parser.add_argument("--mode", choices=["pcd", "obs"], default="obs",
+                        help="pcd: test get_latest_rgbd. obs: test ObservationManager.get_obs (default)")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH,
+                        help="Path to camera_info.yaml")
+    parser.add_argument("--duration", type=float, default=10.0)
+    parser.add_argument("--with-robot", action="store_true",
+                        help="Also instantiate crisp_py Robot+Gripper to populate joint_values/ee/gripper_value")
+    parser.add_argument("--ft-sensor", action="store_true",
+                        help="Require FT sensor messages before is_ready")
+    args = parser.parse_args()
+
+    if args.mode == "pcd":
+        test_pointcloud_manager(duration=args.duration, config_path=args.config)
+    else:
+        test_observation_manager(duration=args.duration,
+                                 config_path=args.config,
+                                 with_robot=args.with_robot,
+                                 ft_sensor_on=args.ft_sensor)
 
 
 if __name__ == "__main__":

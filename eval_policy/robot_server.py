@@ -25,84 +25,20 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 from flask import Flask, jsonify, request
 from scipy.spatial.transform import Rotation as R, Slerp
 
-from crisp_py.camera.pointcloud import PointCloudManager
+from crisp_py.camera.pointcloud import ObservationManager
 from crisp_py.gripper.gripper import Gripper, GripperConfig
 from crisp_py.robot import Pose, Robot
 from crisp_py.robot_config import FrankaConfig
-
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import WrenchStamped
-
-
-# ---------------------------------------------------------------------------
-# Local joint-state subscriber (mirrors diff_eval_utils.ros_utils.JointStateSubscriber
-# but stripped of diffusion-policy imports).
-# ---------------------------------------------------------------------------
-class JointStateSubscriber:
-    """Subscribes to /joint_states + gripper state + optional FT sensor."""
-
-    FRANKA_JOINTS = [
-        "fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4",
-        "fr3_joint5", "fr3_joint6", "fr3_joint7",
-    ]
-    GRIPPER_JOINTS = ["gripper_joint"]
-
-    def __init__(self, node, ft_sensor_on: bool = False):
-        self._node = node
-        self.ft_sensor_on = ft_sensor_on
-
-        self._franka_received = False
-        self._gripper_received = False
-        self._ft_received = False
-
-        self.franka_joint_array = None
-        self.gripper_joint_array = None
-        self.gripper_torque_array = None
-
-        node.create_subscription(JointState, "/joint_states",
-                                 self._franka_cb, 10)
-        node.create_subscription(JointState, "/gripper/gripper_state",
-                                 self._gripper_cb, 10)
-        node.create_subscription(WrenchStamped,
-                                 "/ft/robotiq_force_torque_sensor_broadcaster/wrench",
-                                 self._ft_cb, 10)
-
-    def _franka_cb(self, msg: JointState):
-        arr = [p for n, p in zip(msg.name, msg.position) if n in self.FRANKA_JOINTS]
-        if arr:
-            self.franka_joint_array = np.asarray(arr, dtype=np.float32)
-            self._franka_received = True
-
-    def _gripper_cb(self, msg: JointState):
-        arr = []
-        for n, p in zip(msg.name, msg.position):
-            if n in self.GRIPPER_JOINTS:
-                arr.append(1.0 if p >= 0.95 else 0.0)
-        if arr:
-            self.gripper_joint_array = np.asarray(arr, dtype=np.float32)
-            self._gripper_received = True
-
-    def _ft_cb(self, msg: WrenchStamped):
-        w = msg.wrench
-        self.gripper_torque_array = np.asarray(
-            [w.force.x, w.force.y, w.force.z,
-             w.torque.x, w.torque.y, w.torque.z], dtype=np.float32)
-        self._ft_received = True
-
-    @property
-    def is_ready(self) -> bool:
-        if self.ft_sensor_on:
-            return self._franka_received and self._gripper_received and self._ft_received
-        return self._franka_received and self._gripper_received
 
 
 # ---------------------------------------------------------------------------
 # Encoding helpers (same convention used by diffusion_clients.py)
 # ---------------------------------------------------------------------------
-def encode_array(arr: np.ndarray) -> dict:
+def encode_array(arr: np.ndarray | None) -> dict | None:
     if arr is None:
         return None
     arr = np.ascontiguousarray(arr)
@@ -121,7 +57,7 @@ def decode_array(payload: dict) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# RobotServer — wraps Robot + Gripper + PointCloudManager and exposes the API.
+# RobotServer — wraps Robot + Gripper + ObservationManager and exposes the API.
 # ---------------------------------------------------------------------------
 class RobotServer:
 
@@ -160,18 +96,23 @@ class RobotServer:
             self.robot.cartesian_controller_parameters_client.load_param_config(
                 file_path="config/control/default_cartesian_impedance.yaml")
 
-        # Cameras + extra joint state sub
-        print(f"Loading PointCloudManager from {camera_config}")
-        self.pcd_manager = PointCloudManager(camera_config)
-        self.joint_state_sub = JointStateSubscriber(self.pcd_manager,
-                                                    ft_sensor_on=ft_sensor_on)
+        # Unified observation manager (cameras + joint states + gripper + FT)
+        print(f"Loading ObservationManager from {camera_config}")
+        self.obs_manager = ObservationManager(
+            camera_config,
+            robot=self.robot,
+            gripper=self.gripper,
+            ft_sensor_on=ft_sensor_on,
+        )
 
+        self._executor = MultiThreadedExecutor(num_threads=4)
+        self._executor.add_node(self.obs_manager)
         self._spin_thread = threading.Thread(
-            target=rclpy.spin, args=(self.pcd_manager,), daemon=True)
+            target=self._executor.spin, daemon=True)
         self._spin_thread.start()
 
         print("Waiting for sensor streams...")
-        while not self.joint_state_sub.is_ready:
+        while not self.obs_manager.is_ready:
             time.sleep(0.1)
 
         # Tunable interpolation count for goto()
@@ -182,39 +123,19 @@ class RobotServer:
     # -- observation -----------------------------------------------------
     def get_obs(self) -> dict:
         """Return the latest observation as a JSON-serialisable dict."""
-        # Wait for at least one synchronized frame
-        while not self.pcd_manager.rgb_images or not self.pcd_manager.depth_images:
-            time.sleep(0.005)
-        while self.pcd_manager.inhand_image is None:
-            time.sleep(0.005)
-
-        rgb = [np.asarray(img) for img in self.pcd_manager.rgb_images]
-        depth = [np.asarray(img) for img in self.pcd_manager.depth_images]
-        inhand_rgb = np.asarray(self.pcd_manager.inhand_image)
-        inhand_depth = np.asarray(self.pcd_manager.inhand_depth)
-
-        ee = self.robot.end_effector_pose
-        ee_position = np.asarray(ee.position, dtype=np.float32)
-        ee_quat_xyzw = ee.orientation.as_quat().astype(np.float32)
-
-        joint_values = np.asarray(self.robot.joint_values, dtype=np.float32)
-
-        gripper_value = float(self.gripper.value) if self.gripper.value is not None else None
-
+        obs = self.obs_manager.get_obs()
         return {
-            "timestamp": time.time(),
-            "rgb": [encode_array(x) for x in rgb],            # 3 external cams
-            "depth": [encode_array(x) for x in depth],        # 3 external cams (uint16, mm)
-            "inhand_rgb": encode_array(inhand_rgb),
-            "inhand_depth": encode_array(inhand_depth),       # meters (float)
-            "joint_values": encode_array(joint_values),
-            "ee_position": encode_array(ee_position),
-            "ee_quat_xyzw": encode_array(ee_quat_xyzw),
-            "gripper_value": gripper_value,
-            "gripper_state": encode_array(self.joint_state_sub.gripper_joint_array)
-                if self.joint_state_sub.gripper_joint_array is not None else None,
-            "ft_wrench": encode_array(self.joint_state_sub.gripper_torque_array)
-                if self.joint_state_sub.gripper_torque_array is not None else None,
+            "timestamp": obs["timestamp"],
+            "rgb": [encode_array(x) for x in obs["rgb"]],
+            "depth": [encode_array(x) for x in obs["depth"]],
+            "inhand_rgb": encode_array(obs["inhand_rgb"]),
+            "inhand_depth": encode_array(obs["inhand_depth"]),
+            "joint_values": encode_array(obs["joint_values"]),
+            "ee_position": encode_array(obs["ee_position"]),
+            "ee_quat_xyzw": encode_array(obs["ee_quat_xyzw"]),
+            "gripper_value": obs["gripper_value"],
+            "gripper_state": encode_array(obs["gripper_state"]),
+            "ft_wrench": encode_array(obs["ft_wrench"]),
         }
 
     # -- control ---------------------------------------------------------
@@ -273,7 +194,7 @@ class RobotServer:
 
     def shutdown(self):
         try:
-            self.pcd_manager.destroy_node()
+            self.obs_manager.destroy_node()
         except Exception:
             pass
         try:
@@ -324,7 +245,7 @@ def build_app(server: RobotServer) -> Flask:
 def parse_args():
     p = argparse.ArgumentParser(description="Pure robot+camera HTTP server")
     p.add_argument("--camera-config", default='camera_info.yaml',
-                   help="Path to camera_info.yaml (PointCloudManager config)")
+                   help="Path to camera_info.yaml (ObservationManager config)")
     p.add_argument("--ctrl-space", default="cartesian",
                    choices=["cartesian", "joint"])
     p.add_argument("--ft-sensor-on", action="store_true",
