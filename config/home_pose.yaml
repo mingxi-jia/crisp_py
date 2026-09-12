@@ -1,0 +1,34 @@
+# Home joint configuration for the Franka, in radians, joints 1-7.
+#
+# THE single source of truth for the home pose. Read through
+# control/home_pose.py by robot_server.py, set_home.py and DPEvalConfig,
+# so there is exactly one place to change it.
+#
+# Recapture the arm's current pose with:
+#     python -m control.set_home
+home_config:
+  - 0.01679256844436776
+  - -0.0833301944214534
+  - -0.040579719733383084
+  - -2.0865322205133494
+  - -0.014768666401160454
+  - 2.0120895224142443
+  - -0.0052230549993710846
+
+# Seconds allowed for the homing trajectory.
+time_to_home: 5.0
+
+# Alternate poses, selected by deploy/example.py --home-pos.
+poses:
+  1:
+    - 0.05378568967307367
+    - -0.08936469665253784
+    - 0.13327240855551006
+    - -2.0518098044337747
+    - -0.009624740470170366
+    - 1.9747552779285071
+    - 0.17849911770258156
+
+# Provenance, so a surprising pose can be traced.
+captured_at: "2026-09-10"
+captured_from: "/joint_states"

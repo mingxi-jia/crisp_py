@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Franka Control Panel</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --fg: #e6e9ef; --muted: #8b93a7; --accent: #4fc3f7;
+    --ok: #4CAF50; --warn: #FF9800; --err: #F44336;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 12px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  .spacer { flex: 1; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+    color: var(--muted); background: #10131a; border: 1px solid var(--line);
+    padding: 5px 11px; border-radius: 999px;
+  }
+  button {
+    font: inherit; font-size: 13px; color: var(--fg); background: #222735;
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 7px 15px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #2b3143; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.danger { background: #4a2020; border-color: #6d2b2b; }
+  button.danger:hover:not(:disabled) { background: #5e2727; }
+  main { padding: 18px; display: grid; gap: 18px; grid-template-columns: 1fr; }
+  @media (min-width: 1000px) { main { grid-template-columns: 2fr 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+  }
+  .card > h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--muted); margin: 0; padding: 11px 14px;
+    border-bottom: 1px solid var(--line); font-weight: 600;
+  }
+  .cams { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); }
+  .cam { position: relative; background: #000; aspect-ratio: 16 / 9; }
+  .cam img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cam .tag {
+    position: absolute; left: 8px; top: 8px; font: 11px var(--mono);
+    background: rgba(0,0,0,.66); padding: 2px 7px; border-radius: 4px; color: var(--accent);
+  }
+  .cam .off {
+    position: absolute; inset: 0; display: none; place-items: center;
+    color: var(--muted); font-size: 12px; text-align: center; padding: 10px;
+  }
+  .cam.stale .off { display: grid; }
+  .cam.stale img { opacity: .18; }
+  .cam.frozen { outline: 2px solid var(--err); outline-offset: -2px; }
+  .cam.frozen img { opacity: .45; filter: grayscale(.6); }
+  .cam .age {
+    position: absolute; right: 8px; top: 8px; font: 11px var(--mono);
+    background: rgba(0,0,0,.66); padding: 2px 7px; border-radius: 4px;
+    color: var(--muted);
+  }
+  .cam.frozen .age { background: var(--err); color: #fff; font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  td:first-child { color: var(--muted); width: 45%; }
+  td:last-child { font-family: var(--mono); text-align: right; }
+  tr:last-child td { border-bottom: none; }
+  .bar { height: 7px; background: #10131a; border-radius: 4px; overflow: hidden; margin-top: 7px; }
+  .bar > div { height: 100%; background: var(--accent); width: 0; transition: width .12s linear; }
+  .pad { padding: 14px; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 9px; line-height: 1.45; }
+  label { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 7px; }
+  input[type=range] { width: 92px; vertical-align: middle; }
+  body.paused { box-shadow: inset 0 0 0 4px var(--warn); }
+  body.paused header { background: #33280f; }
+  #log {
+    font: 11px/1.55 var(--mono); color: var(--muted); padding: 10px 14px;
+    max-height: 130px; overflow-y: auto; white-space: pre-wrap;
+    border-top: 1px solid var(--line);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Franka Control Panel</h1>
+  <span class="pill"><span class="dot" id="conn-dot" style="background:var(--muted)"></span><span id="conn-text">connecting…</span></span>
+  <span class="pill"><span class="dot" id="cam-dot" style="background:var(--muted)"></span><span id="cam-text">cameras —</span></span>
+  <span class="pill" id="pause-pill" hidden><span class="dot" style="background:var(--warn)"></span><span id="pause-text">PAUSED</span></span>
+  <span class="spacer"></span>
+  <label>feed <input type="range" id="fps" min="1" max="15" value="6"><span id="fps-val" style="font-family:var(--mono)">6</span> fps</label>
+  <button id="btn-open">Open gripper</button>
+  <button id="btn-close">Close gripper</button>
+  <button id="btn-pause">Pause</button>
+  <button class="danger" id="btn-cam-stop">Disconnect cameras</button>
+  <button id="btn-cam-start">Reconnect cameras</button>
+  <button class="danger" id="btn-reset">Reset to home</button>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Cameras</h2>
+    <div class="cams" id="cams"></div>
+  </section>
+
+  <div style="display:grid; gap:18px; align-content:start">
+    <section class="card">
+      <h2>End effector</h2>
+      <table>
+        <tr><td>x</td><td id="x">—</td></tr>
+        <tr><td>y</td><td id="y">—</td></tr>
+        <tr><td>z</td><td id="z">—</td></tr>
+        <tr><td>roll / pitch / yaw</td><td id="rpy">—</td></tr>
+      </table>
+      <div class="pad" style="padding-top:12px">
+        <div style="display:flex;justify-content:space-between">
+          <span style="color:var(--muted);font-size:12px">Gripper</span>
+          <span style="font-family:var(--mono)" id="grip">—</span>
+        </div>
+        <div class="bar"><div id="grip-bar"></div></div>
+        <div class="note" id="grip-note">width derived from a nominal stroke, not measured</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Joints</h2>
+      <table id="joints"></table>
+    </section>
+
+    <section class="card">
+      <h2>Activity</h2>
+      <div id="log"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function log(msg, kind) {
+  const el = $("log");
+  const t = new Date().toLocaleTimeString();
+  const color = kind === "err" ? "var(--err)" : kind === "ok" ? "var(--ok)" : "var(--muted)";
+  el.innerHTML = `<div style="color:${color}">[${t}] ${msg}</div>` + el.innerHTML;
+}
+
+// ---- camera feeds --------------------------------------------------------
+// Snapshot polling rather than a long-lived MJPEG stream: this same Flask
+// server also answers the control loop's /get_state and /servo calls, and four
+// persistent multipart streams would each pin a worker thread.
+let feeds = [];
+function buildFeeds(names, inhand) {
+  if (feeds.length === names.length && feeds.every((f, i) => f.id === names[i])) return;
+  $("cams").innerHTML = "";
+  feeds = names.map(id => {
+    const label = id === inhand ? `${id} (in-hand)` : id;
+    const wrap = document.createElement("div");
+    wrap.className = "cam stale";
+    wrap.innerHTML = `<img alt="${label}"><span class="tag">${label}</span>`
+                   + `<span class="age"></span><span class="off">no frame</span>`;
+    $("cams").appendChild(wrap);
+    return { id, wrap, img: wrap.querySelector("img"),
+             age: wrap.querySelector(".age"), busy: false };
+  });
+  // One camera looks silly in a 2-up grid.
+  $("cams").style.gridTemplateColumns =
+    names.length <= 1 ? "1fr" : "repeat(2, 1fr)";
+}
+
+function pollCameras() {
+  for (const f of feeds) {
+    if (f.busy) continue;
+    f.busy = true;
+    const probe = new Image();
+    probe.onload = () => {
+      f.img.src = probe.src;
+      f.wrap.classList.remove("stale");
+      f.busy = false;
+    };
+    probe.onerror = () => { f.wrap.classList.add("stale"); f.busy = false; };
+    probe.src = `/camera/${f.id}.jpg?q=70&t=${Date.now()}`;
+  }
+}
+
+let camTimer = null;
+function setFps(fps) {
+  $("fps-val").textContent = fps;
+  if (camTimer) clearInterval(camTimer);
+  camTimer = setInterval(pollCameras, 1000 / fps);
+}
+$("fps").addEventListener("input", e => setFps(+e.target.value));
+
+// ---- state ---------------------------------------------------------------
+// Intrinsic XYZ euler, matching scipy's Rotation.as_euler('XYZ') -- the
+// convention the controllers and teleop code use, so these numbers line up
+// with what the Python side manipulates. (Not the aerospace ZYX convention.)
+function quatToRpy(q) {
+  const [x, y, z, w] = q;
+  // quaternion -> rotation matrix (only the entries we need)
+  const m02 =     2*(x*z + y*w);
+  const m12 =     2*(y*z - x*w);
+  const m22 = 1 - 2*(x*x + y*y);
+  const m01 =     2*(x*y - z*w);
+  const m00 = 1 - 2*(y*y + z*z);
+  // R = Rx(a) Ry(b) Rz(c)
+  const b = Math.asin(Math.max(-1, Math.min(1, m02)));
+  const a = Math.atan2(-m12, m22);
+  const c = Math.atan2(-m01, m00);
+  return [a, b, c].map(r => r * 180 / Math.PI);
+}
+
+// The server sends numpy arrays as base64 .npy; decode just the float32 payload.
+function decodeNpy(payload) {
+  if (!payload) return null;
+  const bin = atob(payload.data);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const headerLen = bytes[8] | (bytes[9] << 8);          // v1.0 header
+  const offset = 10 + headerLen;
+  const header = new TextDecoder().decode(bytes.slice(10, offset));
+  const dtype = /'descr':\s*'([^']+)'/.exec(header)[1];
+  const buf = bytes.buffer.slice(bytes.byteOffset + offset);
+  if (dtype.includes("f4")) return Array.from(new Float32Array(buf));
+  if (dtype.includes("f8")) return Array.from(new Float64Array(buf));
+  throw new Error("unsupported dtype " + dtype);
+}
+
+let isPaused = null;
+function setPaused(p) {
+  if (p === isPaused) return;
+  isPaused = p;
+  document.body.classList.toggle("paused", p);
+  $("pause-pill").hidden = !p;
+  const b = $("btn-pause");
+  b.textContent = p ? "Resume" : "Pause";
+  b.classList.toggle("danger", !p);
+  log(p ? "robot PAUSED — motion commands are held" : "robot resumed", p ? "err" : "ok");
+}
+
+function setConn(ok, text) {
+  $("conn-dot").style.background = ok ? "var(--ok)" : "var(--err)";
+  $("conn-text").textContent = text;
+}
+
+let failures = 0;
+async function pollState() {
+  try {
+    const r = await fetch("/get_state", { method: "POST" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const s = await r.json();
+
+    const p = decodeNpy(s.ee_position);
+    const q = decodeNpy(s.ee_quat_xyzw);
+    $("x").textContent = p[0].toFixed(4) + " m";
+    $("y").textContent = p[1].toFixed(4) + " m";
+    $("z").textContent = p[2].toFixed(4) + " m";
+    $("rpy").textContent = quatToRpy(q).map(v => v.toFixed(1) + "°").join("  ");
+
+    if (s.gripper_value === null || s.gripper_value === undefined) {
+      $("grip").textContent = "—";
+    } else {
+      const mm = s.gripper_width_mm;
+      $("grip").textContent =
+        (mm === null || mm === undefined ? "" : mm.toFixed(1) + " mm  ")
+        + "(" + s.gripper_value.toFixed(2) + ")";
+      $("grip-bar").style.width = (s.gripper_value * 100).toFixed(1) + "%";
+    }
+
+    const j = decodeNpy(s.joint_values) || [];
+    $("joints").innerHTML = j.map((v, i) =>
+      `<tr><td>joint ${i+1}</td><td>${v.toFixed(4)} rad</td></tr>`).join("");
+
+    // Pause is surfaced in /get_state so it stays correct even when another
+    // client (a deploy script, a second browser) toggles it.
+    setPaused(!!s.paused);
+
+    failures = 0;
+    setConn(true, "connected");
+  } catch (e) {
+    if (++failures === 1) log("state poll failed: " + e.message, "err");
+    setConn(false, "disconnected");
+  }
+}
+
+// ---- actions -------------------------------------------------------------
+async function post(route, body) {
+  const r = await fetch(route, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) throw new Error(j.error || "HTTP " + r.status);
+  return j;
+}
+
+function wire(id, label, fn, confirmMsg) {
+  $(id).addEventListener("click", async () => {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    const btns = document.querySelectorAll("header button");
+    btns.forEach(b => b.disabled = true);
+    const orig = $(id).textContent;
+    $(id).textContent = "working…";
+    log(label + " requested");
+    try {
+      await fn();
+      log(label + " done", "ok");
+    } catch (e) {
+      log(label + " failed: " + e.message, "err");
+    } finally {
+      $(id).textContent = orig;
+      btns.forEach(b => b.disabled = false);
+      // Re-assert the camera buttons: which of them is legal depends on
+      // whether the nodes are running, not on whether an action is in flight.
+      pollCameraStatus();
+    }
+  });
+}
+
+// ---- camera process state ------------------------------------------------
+// The realsense *nodes* hold the USB devices, not this server (which only
+// subscribes to their ROS topics). Releasing them is what lets
+// realsense-viewer, or any other librealsense client, open a camera.
+let camsRunning = null;
+let camWasFrozen = false;
+async function pollCameraStatus() {
+  try {
+    const r = await fetch("/cameras/status", { method: "POST" });
+    const s = await r.json();
+    camsRunning = s.running;
+    if (Array.isArray(s.names)) buildFeeds(s.names, s.inhand_camera);
+
+    // Per-camera freshness. A node can be alive while its camera has dropped
+    // off the USB bus, leaving its last frame in memory forever -- so age is
+    // the only trustworthy signal, not the process count.
+    const frames = s.frames || {};
+    let anyFrozen = false;
+    for (const f of feeds) {
+      const fr = frames[f.id] || {};
+      const age = fr.age_s;
+      const stale = fr.stale !== undefined
+        ? fr.stale : (age === null || age === undefined || age > 1.0);
+      f.wrap.classList.toggle("frozen", !!stale && age !== null && age !== undefined);
+      if (age === null || age === undefined) {
+        f.age.textContent = "no frame";
+      } else if (stale) {
+        f.age.textContent = `STALE ${age.toFixed(1)}s`;
+        anyFrozen = true;
+      } else {
+        f.age.textContent = `${(age * 1000).toFixed(0)} ms`;
+      }
+    }
+    if (anyFrozen && !camWasFrozen) log("a camera stopped delivering frames", "err");
+    camWasFrozen = anyFrozen;
+    const staleList = s.stale || [];
+    if (!s.running) {
+      $("cam-dot").style.background = "var(--warn)";
+      $("cam-text").textContent = "cameras disconnected";
+    } else if (staleList.length) {
+      $("cam-dot").style.background = "var(--err)";
+      $("cam-text").textContent = `${staleList.join(", ")} not streaming`;
+    } else {
+      $("cam-dot").style.background = "var(--ok)";
+      $("cam-text").textContent = `cameras up (${s.n_nodes} node${s.n_nodes === 1 ? "" : "s"})`;
+    }
+    $("btn-cam-stop").disabled  = !s.running;
+    $("btn-cam-start").disabled = s.running;
+  } catch (e) {
+    $("cam-dot").style.background = "var(--muted)";
+    $("cam-text").textContent = "cameras ?";
+  }
+}
+
+wire("btn-pause", "Pause/resume", async () => {
+  const r = await post(isPaused ? "/resume" : "/pause");
+  setPaused(!!r.paused);
+});
+
+wire("btn-cam-stop", "Disconnect cameras", async () => {
+  const r = await post("/cameras/stop");
+  log(r.message || "stopped", r.ok ? "ok" : "err");
+  feeds.forEach(f => f.wrap.classList.add("stale"));
+  await pollCameraStatus();
+}, "Disconnect the cameras?\n\nThis stops the realsense nodes and frees the "
+ + "USB devices so realsense-viewer can open them. Any running policy or "
+ + "recording will stop receiving images.");
+
+wire("btn-cam-start", "Reconnect cameras", async () => {
+  const r = await post("/cameras/start");
+  log(r.message || "started");
+  for (let i = 0; i < 25; i++) {            // nodes need ~20-40 s
+    await new Promise(res => setTimeout(res, 2000));
+    await pollCameraStatus();
+    if (camsRunning) { log("cameras back up", "ok"); return; }
+  }
+  log("cameras did not come up within 50 s — check the server log", "err");
+});
+
+wire("btn-open",  "Open gripper",  () => post("/set_gripper", { value: 1.0 }));
+wire("btn-close", "Close gripper", () => post("/set_gripper", { value: 0.0 }));
+wire("btn-reset", "Reset to home", () => post("/home"),
+     "Move the robot to its home pose?\n\nThe arm will move. Make sure the workspace is clear.");
+
+setFps(+$("fps").value);
+await_first_status();
+async function await_first_status() { await pollCameraStatus(); pollCameras(); }
+pollState();
+pollCameraStatus();
+setInterval(pollState, 200);
+setInterval(pollCameraStatus, 3000);
+log("panel loaded");
+</script>
+</body>
+</html>

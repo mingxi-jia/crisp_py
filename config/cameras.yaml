@@ -1,0 +1,43 @@
+# Camera configuration for the direct RealSense backend.
+#
+# Read by control/robot_server.py at startup. This is the single place camera
+# identity and stream settings live -- the ROS launch file is only used by the
+# legacy 'ros' backend.
+#
+# Find serials with:  python -m control.observer --devices
+#
+# exposure_us: motion blur is exposure time, not frame rate. A gripper moving
+# at 0.3 m/s smears 10 mm during a 33 ms exposure. Auto-exposure optimises for
+# brightness and picks long exposures, so pin it manually and raise gain to
+# compensate. Setting exposure_us implies auto_exposure: false.
+#   ~5000 us   crisp under good light, needs gain
+#   ~10000 us  a reasonable compromise
+#   auto       omit exposure_us (brightest, blurriest)
+#
+# depth: off unless something actually reads it. The pi0.5 observation is two
+# RGB images plus joint positions, and a depth stream costs ~40% of a camera's
+# USB bandwidth plus a depth-to-colour alignment pass.
+
+inhand_camera: cam4
+
+cameras:
+  cam1:                        # side / exterior view (static, blurs least)
+    serial: "239222303046"
+    width: 848
+    height: 480
+    fps: 15
+    depth: false
+    exposure_us: 20000
+    gain: 64
+
+  cam4:                        # in-hand (D405) -- moves with the gripper, so
+    serial: "218722271574"      # it is the one that actually blurs
+    width: 480
+    height: 270
+    fps: 15
+    depth: false
+    # 5 ms/gain 96 was picked from blur arithmetic alone and was visibly
+    # grainy: SNR 13 raw, 24 at the policy input. 10 ms/gain 64 measures
+    # SNR 20 raw / 35 at the input for 4.8 px blur instead of 2.4 px.
+    exposure_us: 10000
+    gain: 64

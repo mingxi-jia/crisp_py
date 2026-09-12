@@ -26,3 +26,10 @@ tests/unit/__pycache__
 raw_datasets
 debug_data/*
 debug_plots/*
+# third_party holds upstream clones (each with its own .git);
+# track third_party/README.md, ignore the checkouts themselves.
+third_party/*
+!third_party/README.md
+
+# uv creates this if you run `uv run` from the repo root by mistake
+.venv

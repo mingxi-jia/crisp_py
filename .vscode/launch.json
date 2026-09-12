@@ -5,6 +5,8 @@
     "version": "0.2.0",
     "configurations": [
 
+
+
     
 
 
@@ -14,7 +16,10 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "MPLBACKEND": "Agg"
+            }
         },
         {
             "name": "Python Debugger: pcd example",
@@ -23,39 +28,27 @@
             "program": "${workspaceFolder}/examples/pcd_example.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
-            "justMyCode": false
+            "justMyCode": false,
+            "env": {
+                "MPLBACKEND": "Agg"
+            }
         },
         {
             "name": "Python Debugger: pcd diffusion policy eval",
             "type": "python",
             "request": "launch",
-            "program": "${workspaceFolder}/eval/pcd_diff_eval.py",
-            "console": "integratedTerminal",
-            "cwd": "${workspaceFolder}",
-            "justMyCode": false,
-            "args": [
-            "--mode", "simple",
-            "--n-steps", "60",
-            "--direct-policy",
-            "--ckpt-path", "/home/mingxi/Downloads/epoch=0060-val_loss=0.021 (1).ckpt"
-            ]
-        }
-        ,
-        {
-            "name": "Python Debugger: eval.py simple direct policy (ckpt 0080)",
-            "type": "python",
-            "request": "launch",
-            "program": "${workspaceFolder}/eval/eval.py",
+            "program": "${workspaceFolder}/eval_policy/go.py",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "justMyCode": false,
             "args": [
                 "--mode", "simple",
-                "--n-steps", "60",
-                "--direct-policy",
-                "--ckpt-path", "/home/mingxi/Downloads/epoch=0240-val_loss=0.007.ckpt"
+                "--n-steps", "9999",
+                "--ctrl-space", "joint",
+                "--ckpt-path", "/home/mingxi/Downloads/17.02.01_diff_voxel_party_host_d3_intv_26_realworld_26_seed42_pretrainT3_finetuneSE3_epoch360.ckpt"
             ]
-        },
+        }
+        ,
         {
             "name": "hand pcd visal",
             "type": "python",
@@ -65,6 +58,28 @@
             "cwd": "${workspaceFolder}",
             "justMyCode": false,
             
+        },
+        {
+            "name": "Python Debugger: intv joint ckpt",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_policy/go.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "justMyCode": false,
+            "env": {
+                "ROS_DOMAIN_ID": "100",
+                "CRISP_CONFIG_PATH": "/home/mingxi/mingxi_ws/crisp/crisp_py/config",
+                "ROS_NETWORK_INTERFACE": "enp4s0",
+                "RMW_IMPLEMENTATION": "rmw_cyclonedds_cpp",
+                "CYCLONEDDS_URI": "/home/mingxi/mingxi_ws/crisp/crisp_py/config/cyclone_config.xml",
+                "MPLBACKEND": "Agg"
+            },
+            "args": [
+                "--mode", "intv",
+                "--ctrl-space", "joint",
+                "--ckpt-path", "/mnt/c2b9de74-0cf1-492c-b46e-70d1bc9419fe/mingxi/XEMB/party_host/d3_100_pretrain.ckpt"
+            ]
         }
         
     ]

@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>π0.5 Policy Panel</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef;
+    --muted:#8b93a7; --accent:#4fc3f7; --ok:#4CAF50; --warn:#FF9800; --err:#F44336;
+    --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 system-ui,-apple-system,sans-serif}
+  header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 18px;
+         background:var(--panel);border-bottom:1px solid var(--line);
+         position:sticky;top:0;z-index:10}
+  h1{font-size:15px;margin:0;font-weight:600}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
+        background:#10131a;border:1px solid var(--line);padding:5px 11px;border-radius:999px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--muted)}
+  button{font:inherit;font-size:13px;color:var(--fg);background:#222735;
+         border:1px solid var(--line);border-radius:7px;padding:6px 13px;cursor:pointer}
+  button:hover{background:#2b3143}
+  main{padding:18px;display:grid;gap:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card>h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+           margin:0;padding:11px 14px;border-bottom:1px solid var(--line);font-weight:600}
+  .cams{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1px;background:var(--line)}
+  .cam{background:#000;padding:10px;display:grid;gap:8px;justify-items:center}
+  .cam .title{font:11px var(--mono);color:var(--accent);justify-self:start}
+  .stack{position:relative;width:100%;max-width:340px;aspect-ratio:1}
+  .stack canvas,.stack img{position:absolute;inset:0;width:100%;height:100%;
+       image-rendering:pixelated;border-radius:4px}
+  .row3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;width:100%}
+  .row3 figure{margin:0;display:grid;gap:4px;justify-items:center}
+  .row3 figcaption{font:10px var(--mono);color:var(--muted)}
+  .row3 .stack{max-width:none}
+  table{width:100%;border-collapse:collapse}
+  td{padding:7px 14px;border-bottom:1px solid var(--line)}
+  td:first-child{color:var(--muted);width:48%}
+  td:last-child{font-family:var(--mono);text-align:right}
+  tr:last-child td{border-bottom:none}
+  .note{color:var(--muted);font-size:12px;padding:10px 14px;line-height:1.45}
+  .cross{position:absolute;border:2px solid #fff;box-shadow:0 0 0 1px #000;
+         pointer-events:none;border-radius:2px;display:none}
+  .two{display:grid;gap:18px;grid-template-columns:1fr}
+  @media(min-width:1100px){.two{grid-template-columns:2fr 1fr}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>π0.5 Policy Panel</h1>
+  <span class="pill"><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
+  <span class="pill" id="basis-pill">PCA basis —</span>
+  <span class="spacer"></span>
+  <span class="pill" id="hint">click a patch in a PCA map</span>
+  <button id="refit">Refit PCA</button>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Observation &amp; features</h2>
+    <div class="cams" id="cams"></div>
+    <div class="note" id="featnote"></div>
+  </section>
+
+  <div class="two">
+    <section class="card">
+      <h2>Selected patch</h2>
+      <table>
+        <tr><td>camera</td><td id="sel-cam">—</td></tr>
+        <tr><td>patch (row, col)</td><td id="sel-rc">—</td></tr>
+        <tr><td>similarity range</td><td id="sel-range">—</td></tr>
+        <tr><td>most similar patch</td><td id="sel-best">—</td></tr>
+      </table>
+      <div class="note">Cosine similarity is computed in this page from the
+        64-component PCA projection, so it reacts instantly. Values are within
+        ~0.05 of the exact 2048-dim result; the pattern is the same.</div>
+    </section>
+
+    <section class="card">
+      <h2>Policy</h2>
+      <table>
+        <tr><td>prompt</td><td id="p-prompt">—</td></tr>
+        <tr><td>gripper (DROID)</td><td id="p-grip">—</td></tr>
+        <tr><td>|v| max</td><td id="p-vmax">—</td></tr>
+        <tr><td>inference</td><td id="p-infer">—</td></tr>
+        <tr><td>step / chunk</td><td id="p-step">—</td></tr>
+        <tr><td>speed</td><td id="p-speed">—</td></tr>
+      </table>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const CAMS = ["exterior", "wrist"];
+const state = {};            // camera -> {reduced, grid, k, unit}
+let selected = null;         // {camera, row, col}
+
+// Features arrive as base64 float32 rather than a JSON array: the same data
+// as JSON is ~4x larger and much slower to parse.
+function decodeFloat32(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Float32Array(bytes.buffer);
+}
+
+// ---- similarity, computed here so a click has no round trip ---------------
+function unitRows(flat, n, k) {
+  const out = new Float32Array(n * k);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let j = 0; j < k; j++) { const v = flat[i*k+j]; s += v*v; }
+    const inv = s > 1e-12 ? 1/Math.sqrt(s) : 0;
+    for (let j = 0; j < k; j++) out[i*k+j] = flat[i*k+j] * inv;
+  }
+  return out;
+}
+function cosineMap(unit, n, k, index) {
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let s = 0;
+    for (let j = 0; j < k; j++) s += unit[i*k+j] * unit[index*k+j];
+    out[i] = s;
+  }
+  return out;
+}
+// Blue (dissimilar) -> black -> amber (similar). Diverging, so 0 is readable.
+function simColor(v) {
+  const t = Math.max(-1, Math.min(1, v));
+  return t >= 0 ? [Math.round(247*t), Math.round(195*t), Math.round(79*t)]
+                : [0, Math.round(90*-t), Math.round(200*-t)];
+}
+
+function buildCameraCard(name) {
+  const wrap = document.createElement("div");
+  wrap.className = "cam";
+  wrap.innerHTML = `
+    <span class="title" id="t-${name}">${name}</span>
+    <div class="row3">
+      <figure><div class="stack"><img id="obs-${name}"></div>
+              <figcaption>observation (sent)</figcaption></figure>
+      <figure><div class="stack"><img id="pca-${name}"><div class="cross" id="x-${name}"></div></div>
+              <figcaption>PCA of features</figcaption></figure>
+      <figure><div class="stack"><img id="ovl-${name}"><canvas id="sim-${name}" width="16" height="16"></canvas>
+              <div class="cross" id="xs-${name}"></div></div>
+              <figcaption>cosine similarity</figcaption></figure>
+    </div>`;
+  $("cams").appendChild(wrap);
+
+  for (const src of [`pca-${name}`, `sim-${name}`]) {
+    $(src).style.cursor = "crosshair";
+    $(src).addEventListener("click", ev => {
+      const st = state[name];
+      if (!st) return;
+      const r = ev.target.getBoundingClientRect();
+      const col = Math.min(st.grid-1, Math.max(0, Math.floor((ev.clientX-r.left)/r.width*st.grid)));
+      const row = Math.min(st.grid-1, Math.max(0, Math.floor((ev.clientY-r.top)/r.height*st.grid)));
+      selected = { camera: name, row, col };
+      drawSimilarity();
+    });
+  }
+}
+
+function drawSimilarity() {
+  for (const name of CAMS) {
+    const cross = $(`x-${name}`), crossS = $(`xs-${name}`);
+    if (cross) cross.style.display = "none";
+    if (crossS) crossS.style.display = "none";
+  }
+  if (!selected) return;
+  const { camera, row, col } = selected;
+  const st = state[camera];
+  if (!st) return;
+
+  const idx = row * st.grid + col;
+  const sim = cosineMap(st.unit, st.n, st.k, idx);
+
+  const cv = $(`sim-${camera}`), ctx = cv.getContext("2d");
+  const img = ctx.createImageData(st.grid, st.grid);
+  for (let i = 0; i < st.n; i++) {
+    const [r, g, b] = simColor(sim[i]);
+    img.data[i*4] = r; img.data[i*4+1] = g; img.data[i*4+2] = b; img.data[i*4+3] = 200;
+  }
+  ctx.putImageData(img, 0, 0);
+
+  for (const id of [`x-${camera}`, `xs-${camera}`]) {
+    const el = $(id);
+    el.style.display = "block";
+    el.style.left = `${col/st.grid*100}%`;  el.style.top = `${row/st.grid*100}%`;
+    el.style.width = `${100/st.grid}%`;     el.style.height = `${100/st.grid}%`;
+  }
+
+  let best = 0;
+  for (let i = 0; i < st.n; i++) if (i !== idx && sim[i] > sim[best]) best = i;
+  $("sel-cam").textContent = camera;
+  $("sel-rc").textContent = `(${row}, ${col})  #${idx}`;
+  $("sel-range").textContent = `${Math.min(...sim).toFixed(3)} … ${Math.max(...sim).toFixed(3)}`;
+  $("sel-best").textContent = `(${Math.floor(best/st.grid)}, ${best%st.grid})  ${sim[best].toFixed(3)}`;
+  $("hint").textContent = "amber = similar, blue = dissimilar";
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/state")).json();
+    if (!s.present) {
+      $("dot").style.background = "var(--warn)";
+      $("status").textContent = "waiting for the control loop";
+      return;
+    }
+    const stale = s.age_s > 3;
+    $("dot").style.background = stale ? "var(--warn)" : "var(--ok)";
+    $("status").textContent = stale
+      ? `no update for ${s.age_s.toFixed(0)}s` : "live";
+
+    const o = s.obs || {}, f = s.features || {}, a = s.action, L = s.loop || {};
+    $("p-prompt").textContent = s.prompt ? `"${s.prompt}"` : "(empty)";
+    $("p-grip").textContent = o.gripper_droid == null ? "—"
+      : `${o.gripper_droid.toFixed(2)} (${o.gripper_droid > .5 ? "closed" : "open"})`;
+    $("p-vmax").textContent = a ? a.velocity_absmax.toFixed(3) : "—";
+    $("p-infer").textContent = L.inference_ms
+      ? `${L.inference_ms.toFixed(0)} ms · ${L.n_inferences}x` : "—";
+    $("p-step").textContent = `${L.step}/${L.max_steps} · ${L.chunk_index}/${L.open_loop_horizon}`;
+    $("p-speed").textContent = `${L.speed_scale}x @ ${L.rate_hz} Hz${L.dry_run ? " · DRY RUN" : ""}`;
+
+    const jpegs = { exterior: o.exterior_jpeg, wrist: o.wrist_jpeg };
+    const fits  = { exterior: o.exterior_fit,  wrist: o.wrist_fit };
+    const names = { exterior: o.external_camera, wrist: o.wrist_camera };
+    let settled = true, evr = null;
+
+    for (const name of CAMS) {
+      if (!$(`obs-${name}`)) buildCameraCard(name);
+      if (jpegs[name]) {
+        const url = "data:image/jpeg;base64," + jpegs[name];
+        $(`obs-${name}`).src = url;
+        $(`ovl-${name}`).src = url;
+      }
+      $(`t-${name}`).textContent = `${name} · ${names[name] || "?"} · ${fits[name] || "?"}`;
+
+      const fd = f[name];
+      if (!fd || fd.error) { $(`pca-${name}`).removeAttribute("src"); continue; }
+      if (fd.pca_png) $(`pca-${name}`).src = "data:image/png;base64," + fd.pca_png;
+      const k = fd.n_components, grid = fd.grid, n = grid*grid;
+      const flat = decodeFloat32(fd.reduced_b64);
+      state[name] = { grid, k, n, reduced: flat, unit: unitRows(flat, n, k) };
+      settled = settled && fd.basis_settled;
+      evr = fd.explained_variance;
+    }
+
+    $("basis-pill").textContent = settled
+      ? `PCA basis fixed${evr ? ` · ${(evr*100).toFixed(0)}% var` : ""}`
+      : "PCA basis still fitting…";
+    if (selected) drawSimilarity();
+  } catch (e) {
+    $("dot").style.background = "var(--err)";
+    $("status").textContent = "disconnected";
+  }
+}
+
+$("refit").addEventListener("click", async () => {
+  await fetch("/refit", { method: "POST" });
+  $("basis-pill").textContent = "PCA basis refitting…";
+});
+
+poll();
+setInterval(poll, 500);
+</script>
+</body>
+</html>

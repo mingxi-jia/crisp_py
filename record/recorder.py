@@ -35,6 +35,7 @@ class RecorderConfig:
     # output_dir: str = '/mnt/c2b9de74-0cf1-492c-b46e-70d1bc9419fe/mingxi/XEMB/raw_datasets/episodes'
     output_dir: str = '/media/mingxi/daaata1/zilai_data/pick_coffee_pod_cog/play/'
     output_dir: str = '/media/mingxi/daaata1/duo_policy/data/raw_datasets/episodes'
+    output_dir: str = '/mnt/c2b9de74-0cf1-492c-b46e-70d1bc9419fe/mingxi/XEMB/raw_datasets/episodes'
     queue_size: int = 20
     sync_slop: float = 0.05  # 50ms max time difference for sync (increased for 4 cameras)
     rgb_encoding: str = 'bgr8'

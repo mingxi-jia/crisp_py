@@ -1,0 +1,58 @@
+# Compliant Cartesian impedance: gives way instead of fighting a collision.
+#
+# The force the controller can apply against an obstruction is
+#
+#     F_max = task.k_pos * task.error_clip
+#
+# because the position error saturates at error_clip. With the default profile
+# that is 500 N/m x 0.20 m = 100 N, far above a Franka's collision reflex
+# (~20-30 N), so a slow collision drives the arm into a fault rather than
+# letting it stop.
+#
+#     this profile:  250 N/m x 0.08 m  =  20 N
+#
+# Cost: softer tracking. The arm lags its target more under load and takes
+# longer to close a large error. It does NOT sag under its own weight -- the
+# Franka gravity-compensates internally (use_gravity_compensation: false means
+# crisp does not add its own term on top).
+#
+# To go softer still, lower error_clip first: it caps the force without
+# changing how briskly small errors are corrected.
+
+limit_error: true
+limit_torques: true
+max_delta_tau: 0.5           # N.m per cycle; rate-limits torque steps
+stop_commands: false
+
+nullspace.stiffness: 3.0     # softer redundancy than the 5.0 default
+
+task.k_pos_x: 250.0
+task.k_pos_y: 250.0
+task.k_pos_z: 250.0
+task.k_rot_x: 25.0
+task.k_rot_y: 25.0
+task.k_rot_z: 25.0
+
+# Damping ~ 2*sqrt(k) for near-critical damping; too little and a soft arm
+# oscillates, which reads as instability rather than compliance.
+task.d_pos_x: 30.0
+task.d_pos_y: 30.0
+task.d_pos_z: 30.0
+task.d_rot_x: 8.0
+task.d_rot_y: 8.0
+task.d_rot_z: 8.0
+
+# The force cap: 250 * 0.08 = 20 N translational.
+task.error_clip.x: 0.08
+task.error_clip.y: 0.08
+task.error_clip.z: 0.08
+task.error_clip.rx: 0.20
+task.error_clip.ry: 0.20
+task.error_clip.rz: 0.20
+
+use_coriolis_compensation: true
+use_friction: true
+use_gravity_compensation: false
+use_local_jacobian: true
+use_operational_space: false
+use_sim_time: false

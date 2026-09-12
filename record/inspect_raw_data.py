@@ -2,6 +2,10 @@
 """
 Interactive viewer for raw dataset RGB images from multiple cameras and episodes.
 Navigate through episodes and frames using arrow keys.
+
+Supports two data sources:
+  - Directory of episode_* folders (default)
+  - HDF5 file (use --hdf5 PATH)
 """
 
 import argparse
@@ -47,6 +51,7 @@ def auto_clean_empty_episodes(episodes_path, use_segmented=False, check_cam=3):
             reason = f"cam{check_cam}/{img_subdir} folder does not exist"
         else:
             images = list(cam_dir.glob("*.png"))
+            print(len(images))
             if len(images) == 0:
                 should_delete = True
                 reason = f"cam{check_cam}/{img_subdir} folder is empty"
@@ -221,6 +226,21 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
             else:
                 print(f"\n  Warning: {intervention_file} does not exist")
 
+        # Load gripper qpos if available
+        gripper_qpos = None
+        if not use_segmented:
+            qpos_file = episode_dir / "state" / "gripper_qpos.npy"
+            if qpos_file.exists():
+                try:
+                    gripper_qpos = np.load(qpos_file)
+                    if len(gripper_qpos) != min_frames:
+                        if len(gripper_qpos) < min_frames:
+                            gripper_qpos = np.pad(gripper_qpos, (0, min_frames - len(gripper_qpos)), mode='edge')
+                        else:
+                            gripper_qpos = gripper_qpos[:min_frames]
+                except Exception as e:
+                    print(f"\n  Warning: Could not load gripper_qpos: {e}")
+
         # Check for false_mark.txt
         if use_segmented:
             false_mark_file = episode_dir / "false_mark.txt"
@@ -236,6 +256,7 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
             'grasp_actions': grasp_actions,
             'eef_pose': eef_pose,
             'intervention_flags': intervention_flags,
+            'gripper_qpos': gripper_qpos,
             'false_marked': false_marked
         })
 
@@ -251,6 +272,83 @@ def load_all_episodes_images(episodes_path, num_cams=3, use_segmented=False, loa
             print(f"Remaining episodes: {len(episodes_data)}")
 
     return episodes_data
+
+
+def load_hdf5_episodes(hdf5_path):
+    """
+    Load episode metadata from a robomimic-style HDF5 file.
+    Images are loaded lazily per frame (the h5py file stays open).
+
+    Expected structure:
+        data/
+          demo_0/
+            obs/
+              cam1_image            (T, H, W, 3)
+              cam2_image            (T, H, W, 3)
+              cam3_image            (T, H, W, 3)
+              robot0_eye_in_hand_image  (T, H, W, 3)
+              robot0_gripper_state  (T,) or (T, 1)
+            actions                 (T, D)
+
+    Returns:
+        (episodes_data, h5file) — caller must close h5file when done.
+    """
+    import h5py
+
+    h5file = h5py.File(hdf5_path, 'r')
+    data_group = h5file['data']
+
+    # Camera key → display cam index mapping
+    cam_key_map = {
+        'cam1_image': 1,
+        'cam2_image': 2,
+        'cam3_image': 3,
+        'robot0_eye_in_hand_image': 4,
+    }
+
+    demo_names = sorted(data_group.keys())
+    print(f"Found {len(demo_names)} demos in {hdf5_path}")
+
+    episodes_data = []
+    for demo_name in demo_names:
+        demo = data_group[demo_name]
+        obs = demo.get('obs', {})
+
+        # Discover which camera keys are present
+        cam_keys = {}
+        for key, cam_idx in cam_key_map.items():
+            if key in obs:
+                cam_keys[cam_idx] = obs[key]  # h5py Dataset, shape (T, H, W, 3)
+
+        if not cam_keys:
+            print(f"  {demo_name}: no camera obs found, skipping")
+            continue
+
+        T = next(iter(cam_keys.values())).shape[0]
+
+        # Gripper state
+        grasp_actions = None
+        if 'robot0_gripper_state' in obs:
+            gs = obs['robot0_gripper_state'][:]  # load fully — small array
+            if gs.ndim == 2:
+                gs = gs[:, 0]
+            grasp_actions = gs.astype(np.float32)
+
+        episodes_data.append({
+            'name': demo_name,
+            'path': None,
+            'num_frames': T,
+            'frames': None,           # not used for HDF5
+            'data_source': 'hdf5',
+            'cam_keys': cam_keys,     # {cam_idx: h5py.Dataset}
+            'grasp_actions': grasp_actions,
+            'eef_pose': None,
+            'intervention_flags': None,
+            'false_marked': False,
+        })
+        print(f"  {demo_name}: {T} frames, cameras: {sorted(cam_keys.keys())}")
+
+    return episodes_data, h5file
 
 
 def create_gripper_bar(width, gripper_value, bar_height=40):
@@ -289,6 +387,41 @@ def create_gripper_bar(width, gripper_value, bar_height=40):
 
     cv2.putText(bar, label, (10, bar_height - 12),
                cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2)
+
+    return bar
+
+
+def create_gripper_qpos_bar(width, qpos_value, bar_height=40):
+    """
+    Create a gripper qpos progress bar visualization (raw float 0.0–1.0).
+
+    Args:
+        width: width of the bar
+        qpos_value: raw gripper position (0.0 = open, ~1.0 = closed)
+        bar_height: height of the bar
+
+    Returns:
+        numpy array: bar visualization
+    """
+    bar = np.zeros((bar_height, width, 3), dtype=np.uint8)
+    bar[:, :] = (30, 30, 30)
+
+    # Border
+    cv2.rectangle(bar, (0, 0), (width - 1, bar_height - 1), (80, 80, 80), 1)
+
+    # Progress fill — cyan color, proportional to qpos
+    qpos_clamped = float(np.clip(qpos_value, 0.0, 1.0))
+    fill_width = int((width - 2) * qpos_clamped)
+    if fill_width > 0:
+        r = int(255 * qpos_clamped)
+        g = int(180 * (1.0 - qpos_clamped))
+        b = int(255 * (1.0 - qpos_clamped * 0.5))
+        bar[1:bar_height - 1, 1:1 + fill_width] = (b, g, r)  # BGR
+
+    # Text label
+    label = f"Gripper qpos: {qpos_value:.3f}"
+    cv2.putText(bar, label, (10, bar_height - 10),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
     return bar
 
@@ -388,38 +521,49 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
     if frame_idx >= episode_data['num_frames']:
         return None
 
-    frame_data = episode_data['frames'][frame_idx]
     static_cameras = []  # Cameras 1-3
     inhand_camera = None  # Camera 4
 
-    for cam_idx in sorted(frame_data.keys()):
-        img = cv2.imread(str(frame_data[cam_idx]))
+    if episode_data.get('data_source') == 'hdf5':
+        for cam_idx in sorted(episode_data['cam_keys'].keys()):
+            raw = np.array(episode_data['cam_keys'][cam_idx][frame_idx])  # (H, W, 3) RGB uint8
+            img = cv2.cvtColor(raw, cv2.COLOR_RGB2BGR)
 
-        if img is None:
-            print(f"Warning: Could not load {frame_data[cam_idx]}")
-            img = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(img, f"Cam {cam_idx} - Not Found", (50, 240),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            if img.shape[0] > max_height:
+                scale = max_height / img.shape[0]
+                img = cv2.resize(img, (int(img.shape[1] * scale), max_height))
 
-        # Resize to max_height while maintaining aspect ratio
-        if img.shape[0] > max_height:
-            scale = max_height / img.shape[0]
-            new_width = int(img.shape[1] * scale)
-            new_height = max_height
-            img = cv2.resize(img, (new_width, new_height))
+            label = f"Cam {cam_idx}" + (" (In-hand)" if cam_idx == 4 else "")
+            cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # Add camera label
-        label = f"Cam {cam_idx}"
-        if cam_idx == 4:
-            label += " (In-hand)"
-        cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                   1, (0, 255, 0), 2)
+            if cam_idx == 4:
+                inhand_camera = img
+            else:
+                static_cameras.append(img)
+    else:
+        frame_data = episode_data['frames'][frame_idx]
+        for cam_idx in sorted(frame_data.keys()):
+            img = cv2.imread(str(frame_data[cam_idx]))
 
-        # Separate cam4 from others
-        if cam_idx == 4:
-            inhand_camera = img
-        else:
-            static_cameras.append(img)
+            if img is None:
+                print(f"Warning: Could not load {frame_data[cam_idx]}")
+                img = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(img, f"Cam {cam_idx} - Not Found", (50, 240),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+            # Resize to max_height while maintaining aspect ratio
+            if img.shape[0] > max_height:
+                scale = max_height / img.shape[0]
+                new_width = int(img.shape[1] * scale)
+                img = cv2.resize(img, (new_width, max_height))
+
+            label = f"Cam {cam_idx}" + (" (In-hand)" if cam_idx == 4 else "")
+            cv2.putText(img, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+            if cam_idx == 4:
+                inhand_camera = img
+            else:
+                static_cameras.append(img)
 
     if not static_cameras and inhand_camera is None:
         return None
@@ -475,6 +619,13 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
         intervention_bar = create_intervention_bar(concat_img.shape[1], intervention_value, bar_height=50)
         bars.append(intervention_bar)
 
+        # Gripper qpos progress bar
+        qpos_value = 0.0
+        if episode_data.get('gripper_qpos') is not None and frame_idx < len(episode_data['gripper_qpos']):
+            qpos_value = float(episode_data['gripper_qpos'][frame_idx])
+        qpos_bar = create_gripper_qpos_bar(concat_img.shape[1], qpos_value, bar_height=50)
+        bars.append(qpos_bar)
+
     # Add false mark bar
     if show_false_mark:
         is_false_marked = episode_data.get('false_marked', False)
@@ -487,7 +638,7 @@ def create_episode_frame_visualization(episode_data, frame_idx, max_height=600, 
     return final_img
 
 
-def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleop_mode=False, intervention_mode=False, min_traj_length=0, auto_clean=False):
+def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleop_mode=False, intervention_mode=False, min_traj_length=0, auto_clean=True):
     """
     Interactive visualization of episodes' RGB images.
 
@@ -673,6 +824,96 @@ def visualize_all_episodes(episodes_path, num_cams=4, use_segmented=False, teleo
     cv2.destroyAllWindows()
 
 
+def visualize_hdf5(hdf5_path):
+    """Interactive viewer for an HDF5 dataset file."""
+    episodes_data, h5file = load_hdf5_episodes(hdf5_path)
+
+    if not episodes_data:
+        print("No demos found or loaded!")
+        h5file.close()
+        return
+
+    print(f"\nTotal demos: {len(episodes_data)}")
+
+    window_name = "HDF5 Episode Viewer"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 3840, 2160)
+
+    current_episode_idx = 0
+    current_frame = 0
+    auto_play = False
+
+    try:
+        while True:
+            episode = episodes_data[current_episode_idx]
+            num_frames = episode['num_frames']
+            current_frame = max(0, min(current_frame, num_frames - 1))
+
+            concat_img = create_episode_frame_visualization(
+                episode, current_frame, show_intervention=False, show_false_mark=False)
+
+            if concat_img is None:
+                print("Failed to create visualization")
+                break
+
+            info_height = 60
+            info_bar = np.zeros((info_height, concat_img.shape[1], 3), dtype=np.uint8)
+
+            cv2.putText(info_bar, f"Demo: {current_episode_idx + 1}/{len(episodes_data)}  [{episode['name']}]",
+                       (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+            cv2.putText(info_bar, f"Frame: {current_frame + 1}/{num_frames}",
+                       (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+            controls = "Up/Down: Episodes | Left/Right: Frames | Space: Auto-play | Q: Quit"
+            text_size = cv2.getTextSize(controls, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            cv2.putText(info_bar, controls,
+                       (concat_img.shape[1] - text_size[0] - 10, 35),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 150, 150), 1)
+
+            cv2.imshow(window_name, np.vstack([concat_img, info_bar]))
+
+            wait_time = 30 if auto_play else 0
+            key = cv2.waitKey(wait_time) & 0xFF
+
+            if key == ord('q') or key == 27:
+                break
+            elif key == 81 or key == 2:  # Left
+                current_frame = max(0, current_frame - 1)
+                auto_play = False
+            elif key == 83 or key == 3:  # Right
+                current_frame = min(num_frames - 1, current_frame + 1)
+                auto_play = False
+            elif key == 82 or key == 0:  # Up
+                current_episode_idx = max(0, current_episode_idx - 1)
+                current_frame = 0
+                auto_play = False
+            elif key == 84 or key == 1:  # Down
+                current_episode_idx = min(len(episodes_data) - 1, current_episode_idx + 1)
+                current_frame = 0
+                auto_play = False
+            elif key == ord(' '):
+                auto_play = not auto_play
+            elif key == ord('r'):
+                current_frame = 0
+                auto_play = False
+            elif key == ord('n'):
+                current_episode_idx = min(len(episodes_data) - 1, current_episode_idx + 1)
+                current_frame = 0
+                auto_play = False
+            elif key == ord('p'):
+                current_episode_idx = max(0, current_episode_idx - 1)
+                current_frame = 0
+                auto_play = False
+
+            if auto_play:
+                current_frame += 1
+                if current_frame >= num_frames:
+                    current_episode_idx = (current_episode_idx + 1) % len(episodes_data)
+                    current_frame = 0
+    finally:
+        cv2.destroyAllWindows()
+        h5file.close()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize episodes' RGB images from multiple cameras",
@@ -719,7 +960,17 @@ Controls:
     parser.add_argument(
         "path",
         type=str,
-        help="Path to episodes root directory"
+        nargs='?',
+        default=None,
+        help="Path to episodes root directory (not needed when --hdf5 is used)"
+    )
+
+    parser.add_argument(
+        "--hdf5",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Load from an HDF5 file instead of an episode directory"
     )
 
     parser.add_argument(
@@ -762,8 +1013,18 @@ Controls:
 
     args = parser.parse_args()
 
-    path = Path(args.path)
+    if args.hdf5:
+        hdf5_path = Path(args.hdf5)
+        if not hdf5_path.exists():
+            print(f"Error: HDF5 file does not exist: {hdf5_path}")
+            return
+        visualize_hdf5(hdf5_path)
+        return
 
+    if not args.path:
+        parser.error("A path argument is required unless --hdf5 is specified")
+
+    path = Path(args.path)
     if not path.exists():
         print(f"Error: Path does not exist: {path}")
         return
