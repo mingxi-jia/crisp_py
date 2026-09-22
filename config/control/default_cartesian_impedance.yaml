@@ -1,3 +1,26 @@
+# ---------------------------------------------------------------------------
+# STABILITY, not just accuracy. These gains are capped by DEAD TIME, measured
+# at ~50 ms from a step response (t63 208 ms, 5% crossing 57 ms). The delay
+# costs phase margin in proportion to wn = sqrt(k/m), and wn grows with k, so
+# stiffness buys accuracy and spends stability:
+#
+#            config          wn    zeta   PM(no delay)  delay   PM left
+#   transl   500/40        12.9    0.52       52 deg     37     15  marginal
+#   transl  1000/50        18.3    0.46       46 deg     52     -7  OSCILLATED
+#   transl   700/65        15.3    0.71       71 deg     44     27  <- here
+#   rot       60/10        17.3    1.44       72 deg     50     22
+#   rot      120/12.5      24.5    1.28       72 deg     70      2  too close
+#   rot       60/10        17.3    1.44       72 deg     50     22  <- here
+#
+# k_pos 1000 with d_pos 50 oscillated during teleop, exactly as the negative
+# margin predicts. Rotation has SMALLER inertia so its wn is HIGHER: k_rot 60
+# was already near the limit and doubling it left 2 deg of margin, so it is
+# back at 60 with a little more damping.
+#
+# The dead time, not these numbers, is what caps performance. Shortening it
+# (control rate, transport latency) is the only way to go stiffer safely.
+# ---------------------------------------------------------------------------
+
 limit_error: true
 limit_torques: true
 
@@ -7,29 +30,66 @@ nullspace.stiffness: 5.0   # softer nullspace so arm is more compliant in redund
 
 stop_commands: false
 
-# Lower Cartesian stiffness for a softer behavior (but still reasonably precise)
-task.k_pos_x: 500.0
-task.k_pos_y: 500.0
-task.k_pos_z: 500.0
+# Translation stiffness raised 500 -> 1000 on measured evidence, not taste.
+# deploy/deploy_spacemouse.py --test and --test-traj on this cell showed:
+#
+#   static   -5.4 mm z bias + ~2 mm friction deadband   (error = F/k)
+#   dynamic  15.1 mm RMS on a figure eight at 0.094 m/s,
+#            180 ms lag, of which 43% was pure lateness  (lag = d/k)
+#
+# Both scale with k: doubling it should halve the static error and, with the
+# damping below, cut the time constant from 80 ms to 50 ms.
+#
+# CAVEAT measured, not predicted: the step response gave t63 = 208 ms and the
+# figure eight implied tau = 150 ms (y) / 270 ms (z), all far above the
+# d/k = 80 ms this file asks for. The arm is 2-3x slower than these gains
+# imply, so the controller may not be realising them. If doubling k does not
+# move the measured tau, that is the finding -- the problem is below this
+# file, in crisp_controllers or franka_ros2, and no value here will fix it.
+task.k_pos_x: 700.0
+task.k_pos_y: 700.0
+task.k_pos_z: 700.0
+# Rotation stiffness 60 -> 120, by the same recipe and the same evidence as
+# the translation change above. Measured with --test-traj --traj-rot-deg 15
+# once translation was already at k=1000:
+#
+#   rotation lag 220 ms   against translation's 100 ms
+#   rotation RMS 2.05 deg, almost all of it swing (1.82) not bias (0.16)
+#
+# i.e. the wrist trails its command rather than sitting off it, which is a
+# d/k problem. Rotation was 3.3x slower than translation on d/k and felt it.
 task.k_rot_x: 60.0
 task.k_rot_y: 60.0
 task.k_rot_z: 60.0
 
-# Damping tuned near critical (approx. 2*sqrt(k) for unit inertia) to keep precision without oscillation
-task.d_pos_x: 40.0
-task.d_pos_y: 40.0
-task.d_pos_z: 40.0
+# Damping 40 -> 50 alongside k. Scaling d by sqrt(2) would hold the damping
+# ratio exactly (57); 50 is slightly under that, trading a little damping for
+# a shorter d/k, because the measured fault is dominated by lag and the step
+# response showed no overshoot to suggest the arm is near instability.
+task.d_pos_x: 65.0
+task.d_pos_y: 65.0
+task.d_pos_z: 65.0
+# Left at the original 10.0. Rotation is already overdamped (zeta ~1.4 at an
+# effective inertia of 0.2 kgm2), and past zeta = 1 extra damping buys no
+# phase margin -- PM is saturated there. Raising it to 12.0 was measured to
+# cost 18% more rotation lag (167 -> 200 ms d/k, 2.05 -> 2.33 deg RMS) for
+# 0 deg of margin, so it is back where it started.
 task.d_rot_x: 10.0
 task.d_rot_y: 10.0
 task.d_rot_z: 10.0
 
-# Increased error clipping to allow larger position corrections (was 0.05 = 5cm)
+# Translation clip halved 0.20 -> 0.10 as k doubled, so the maximum force the
+# controller can push with is UNCHANGED at k * clip = 100 N. Without this the
+# doubled stiffness would also double the force it can drive into an
+# obstruction, which is a safety change nobody asked for.
+# Rotation clip halved as k_rot doubled, so the maximum moment the
+# controller can apply is UNCHANGED at k_rot * clip = 15 Nm.
 task.error_clip.rx: 0.25
 task.error_clip.ry: 0.25
 task.error_clip.rz: 0.25
-task.error_clip.x: 0.20
-task.error_clip.y: 0.20
-task.error_clip.z: 0.20
+task.error_clip.x: 0.143
+task.error_clip.y: 0.143
+task.error_clip.z: 0.143
 
 use_coriolis_compensation: true
 use_friction: true

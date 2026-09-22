@@ -1,0 +1,64 @@
+# Cartesian impedance with translation damped near critical.
+#
+# Motivated by measurement, not taste. With the default profile:
+#
+#   zeta = d / (2*sqrt(k*m))
+#   translation  40 / (2*sqrt(500*3kg))   = 0.52   UNDERDAMPED -> overshoots
+#   rotation     10 / (2*sqrt(60*0.2kgm2)) = 1.44  overdamped  -> sluggish
+#
+# An underdamped axis does not stop when its target does: it overshoots by
+# roughly v*m/d (about 56 mm at 0.75 m/s) and rings on the way back, which
+# reads as the arm "sliding" after the spacemouse is released. No amount of
+# target-side clamping or braking can remove that -- it is the controller's
+# own second-order response.
+#
+# Effective Cartesian inertia at the EE is configuration-dependent (~2-5 kg),
+# so d_pos = 70 targets zeta ~= 0.90-1.10 across that range rather than
+# pinning one value.
+#
+# Rotation is left alone. It is ALREADY overdamped, so adding damping there
+# would make it slower without reducing overshoot it does not have. If
+# rotation feels sluggish the lever is k_rot, not d_rot.
+#
+# Try it live and back out if the arm buzzes: too much damping on a
+# discrete-time controller excites chatter near the control rate.
+#     python -m control.robot_server --compliance damped ...
+# (needs the ("cartesian","damped") entry added to RobotServer.IMPEDANCE_CONFIGS)
+
+limit_error: true
+limit_torques: true
+
+max_delta_tau: 0.5
+
+nullspace.stiffness: 5.0
+
+stop_commands: false
+
+task.k_pos_x: 500.0
+task.k_pos_y: 500.0
+task.k_pos_z: 500.0
+task.k_rot_x: 60.0
+task.k_rot_y: 60.0
+task.k_rot_z: 60.0
+
+# 40 -> 70. zeta goes 0.52 -> 0.90 at 3 kg effective inertia.
+task.d_pos_x: 70.0
+task.d_pos_y: 70.0
+task.d_pos_z: 70.0
+task.d_rot_x: 10.0
+task.d_rot_y: 10.0
+task.d_rot_z: 10.0
+
+task.error_clip.rx: 0.25
+task.error_clip.ry: 0.25
+task.error_clip.rz: 0.25
+task.error_clip.x: 0.20
+task.error_clip.y: 0.20
+task.error_clip.z: 0.20
+
+use_coriolis_compensation: true
+use_friction: true
+use_gravity_compensation: false
+use_local_jacobian: true
+use_operational_space: false
+use_sim_time: false

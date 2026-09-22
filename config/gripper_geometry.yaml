@@ -1,0 +1,49 @@
+# Geometry of the tool bolted to the Franka flange.
+#
+# The robot driver reports poses for the frame in FrankaConfig.target_frame
+# (`fr3_hand_tcp`, the *Franka* hand TCP). That is not where a Robotiq grips:
+# the fingertip sits further along the gripper's own +z, rotated by whatever
+# yaw the adapter plate is bolted at. `ee -> fingertip` is that rigid offset,
+# right-multiplied onto the reported pose.
+#
+# This is not cosmetic. control/kinematics.py applies it to every observation
+# (ee_to_fingertip) and the inverse to every commanded action
+# (fingertip_to_ee), so these two numbers define the frame the policy and the
+# training data speak. Change the gripper or the adapter and change them here;
+# nothing else needs editing. Read by control/kinematics.py, which resolves
+# this path from its own location -- override with $CRISP_GRIPPER_GEOMETRY.
+#
+# Gripper wiring (topics, value range) lives in config/gripper_robotiq.yaml;
+# this file is only about where the tool is in space.
+#
+# THE TOOL LENGTH IS DEFINED HERE AND NOWHERE ELSE.
+#
+#   flange (fr3_link8) -> fingertip TCP  =  209.5 mm
+#
+# The stack is a Robotiq FT 300 force/torque sensor, a coupling plate, then a
+# Robotiq 2F-85 gripper. Everything downstream is derived from that one
+# number; do not restate it anywhere else.
+#
+# offset_xyz below is NOT the tool length -- it is the remainder after the
+# frame the robot driver already reports:
+#
+#   fr3_hand_tcp, the driver's reported frame   103.4 mm   (URDF joint)
+#   offset_xyz z, what this file adds           106.1 mm
+#   ------------------------------------------------------
+#   flange -> fingertip                         209.5 mm
+#
+# The 103.4 mm is not a guess: FK over control/fr3_robot.urdf to
+# fr3_hand_tcp agrees with the pose the robot reports to 0.002 mm, so the
+# driver really is reporting that frame. If the Franka's F_T_EE is ever
+# changed, that stops being true and this remainder must be recomputed --
+# check it with control.projection.fk_residual before trusting the number.
+
+name: robotiq_2f85
+
+fingertip:
+  # Translation from the reported end-effector frame [m], in that frame's
+  # axes. +z is out along the gripper. See the arithmetic above: this is
+  # 209.5 mm of tool minus the 103.4 mm the driver already reports.
+  offset_xyz: [0.0, 0.0, 0.1061]
+  # Orientation offset [rad], intrinsic XYZ euler. The Robotiq mount's 45 deg.
+  offset_rpy: [0.0, 0.0, 0.7853981633974483]

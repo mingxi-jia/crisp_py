@@ -14,7 +14,9 @@ Endpoints:
   POST /resume       -> apply motion commands again
   POST /home         -> home the robot and restore the impedance controller
   GET  /panel        -> live HTML panel (camera feeds, EE pose, gripper, reset)
-  GET  /camera/<cam>.jpg -> latest JPEG frame from cam1..cam4
+  GET  /camera/<cam>.jpg -> latest JPEG frame from a camera by name
+  GET  /overlay      -> where the gripper projects to in each calibrated camera
+  POST /takeover     -> hand the arm to the spacemouse (a policy may keep running)
   POST /cameras/stop -> stop the realsense nodes, freeing the USB devices
   POST /cameras/start-> relaunch them
   GET  /cameras/status
@@ -71,7 +73,8 @@ class RobotServer:
                  inhand_camera: str | None = None,
                  compliance: str = "normal",
                  camera_backend: str = "realsense",
-                 camera_serials: dict | None = None):
+                 camera_serials: dict | None = None,
+                 takeover_speed: float = 1.0):
         self.ctrl_space = ctrl_space
         if (ctrl_space, compliance) not in self.IMPEDANCE_CONFIGS:
             raise ValueError(f"no impedance profile for {ctrl_space}/{compliance}")
@@ -86,6 +89,12 @@ class RobotServer:
         # them instead would crash the caller mid-rollout.
         self.paused = False
         self.paused_at = None
+        # Takeover: a human jogging with the spacemouse while a policy keeps
+        # running. Distinct from paused -- paused means nobody is driving,
+        # takeover means somebody else is -- and both block a policy's
+        # commands, so the two are reported separately.
+        self.takeover = None
+        self.takeover_speed = float(takeover_speed)
 
         # Gripper
         print("Initializing gripper...")
@@ -121,6 +130,27 @@ class RobotServer:
 
         self.joint_state_sub = self.observer.proprio
 
+        # Where the gripper is in each camera's picture. Panel decoration, but
+        # also the standing check on the calibrations: the gripper is visible
+        # in the feeds, so a cross that sits anywhere else is a calibration
+        # that has drifted. Cameras without a calibration entry are simply
+        # absent from the overlay.
+        self._projectors = {}
+        self._frame_sizes = {}
+        try:
+            from control.projection import Chain, ToolProjector
+            chain = Chain.from_urdf()
+            for name in self.observer.camera_names:
+                projector = ToolProjector.for_camera(name, chain=chain)
+                if projector is not None:
+                    self._projectors[name] = projector
+            if self._projectors:
+                print(f"Tool overlay: {', '.join(sorted(self._projectors))}")
+        except Exception as e:
+            # A missing URDF or a malformed calibration must not stop the
+            # server from driving the robot.
+            print(f"Tool overlay unavailable: {e}")
+
         if do_home:
             print("Going to home position — THE ARM WILL MOVE...")
             self.robot.home()
@@ -150,6 +180,13 @@ class RobotServer:
     IMPEDANCE_CONFIGS = {
         ("cartesian", "normal"):   "config/control/default_cartesian_impedance.yaml",
         ("cartesian", "compliant"): "config/control/compliant_cartesian_impedance.yaml",
+        # Stiffer profiles, for trading steady-state error against compliance.
+        # Steady-state error under a constant disturbance is F/k, so these cut
+        # it proportionally; each pairs d_pos to its k_pos to hold zeta ~= 1
+        # rather than converting the error into overshoot.
+        ("cartesian", "damped"):   "config/control/damped_cartesian_impedance.yaml",
+        ("cartesian", "stiff1000"): "config/control/stiff1000_cartesian_impedance.yaml",
+        ("cartesian", "stiff1500"): "config/control/stiff1500_cartesian_impedance.yaml",
         ("joint", "normal"):       "config/control/joint_impedance_controller.yaml",
         ("joint", "compliant"):    "config/control/compliant_joint_impedance.yaml",
     }
@@ -228,6 +265,97 @@ class RobotServer:
             "inhand_camera": self.inhand_camera,
         })
         return payload
+
+    # -- takeover --------------------------------------------------------
+    def set_takeover(self, on: bool) -> dict:
+        """Hand the arm to the spacemouse, or hand it back.
+
+        Taking over does not stop the policy: its commands keep arriving and
+        keep being dropped, so it goes on planning against the arm the human
+        is moving. Handing back is just letting those commands through again --
+        pi0.5 applies its joint deltas to the *measured* position, so it picks
+        up from wherever the arm now is with no jump and no reset.
+        """
+        if on:
+            if self.takeover is None:
+                from control.takeover import SpacemouseTakeover
+                self.takeover = SpacemouseTakeover(
+                    robot=self.robot, gripper=self.gripper,
+                    speed=self.takeover_speed)
+            status = self.takeover.start()
+            if status.get("error"):
+                print(f"Takeover refused: {status['error']}")
+            else:
+                print("Takeover: the spacemouse has the arm; "
+                      "policy commands are being dropped")
+            return status
+
+        if self.takeover is None:
+            return {"active": False, "error": None}
+        status = self.takeover.stop()
+        print("Takeover released; policy commands apply again")
+        return status
+
+    def takeover_status(self) -> dict:
+        """Never raises. /health reports this, and RobotClient calls /health
+        before anything else -- so an optional extra that throws here would
+        stop every client from connecting at all, which is a far worse failure
+        than the feature being unavailable."""
+        takeover = getattr(self, "takeover", None)
+        if takeover is None:
+            return {"active": False, "error": None}
+        try:
+            return takeover.status()
+        except Exception as e:
+            return {"active": False, "error": f"{type(e).__name__}: {e}"}
+
+    # -- overlay ---------------------------------------------------------
+    def _frame_size(self, name):
+        """(width, height) of a camera's frames, read once and remembered."""
+        if name not in self._frame_sizes:
+            rgb = self.cameras.rgb(name)
+            if rgb is None:
+                return None
+            self._frame_sizes[name] = (rgb.shape[1], rgb.shape[0])
+        return self._frame_sizes[name]
+
+    def tool_overlay(self, frame: str = "fingertip") -> dict:
+        """Where the gripper projects to in each calibrated camera, right now.
+
+        Kept off /get_state deliberately: that is the control loop's hot path
+        at 50 Hz and it does not need forward kinematics run for it.
+        """
+        joints = self.robot.joint_values
+        if joints is None or len(joints) < 7:
+            return {"ok": False, "error": "no joint values"}
+
+        cameras = {}
+        for name, projector in self._projectors.items():
+            size = self._frame_size(name)
+            if size is None:
+                continue
+            try:
+                cameras[name] = projector.project(joints, size, frame=frame)
+            except Exception as e:
+                cameras[name] = {"error": str(e)}
+
+        out = {"ok": True, "frame": frame, "cameras": cameras}
+        # FK against the pose the driver reports: if these disagree the
+        # overlay is drawing the wrong thing, and the panel should say so
+        # rather than showing a confident cross.
+        try:
+            from control.projection import Chain, fk_residual
+            ee = self.robot.end_effector_pose
+            chain = next(iter(self._projectors.values())).chain \
+                if self._projectors else Chain.from_urdf()
+            pos_err, rot_err = fk_residual(
+                chain, np.asarray(joints)[:7], ee.position,
+                ee.orientation.as_quat())
+            out["fk_residual_mm"] = round(pos_err * 1000.0, 2)
+            out["fk_residual_deg"] = round(rot_err, 3)
+        except Exception:
+            pass
+        return out
 
     # -- panel -----------------------------------------------------------
     @property
@@ -469,6 +597,8 @@ class RobotServer:
         target_orient = (R.from_quat(np.asarray(quat_xyzw, dtype=np.float64))
                          if quat_xyzw is not None
                          else self.robot.end_effector_pose.orientation)
+        if self.takeover is not None and self.takeover.active:
+            return {"ok": True, "takeover": True, "applied": False}
         if self.paused:
             # Do not publish a new target: the impedance controller keeps the
             # last one, so the arm holds rather than drifting or jumping.
@@ -495,6 +625,11 @@ class RobotServer:
                 f"running in '{self.ctrl_space}' space and the target would "
                 "be ignored by the active controller"
             )
+        if self.takeover is not None and self.takeover.active:
+            # Accepted and dropped, like a pause: a policy loop should keep
+            # running and re-planning against wherever the human has put the
+            # arm, not crash halfway through a rollout.
+            return {"ok": True, "takeover": True, "applied": False}
         if self.paused:
             return {"ok": True, "paused": True, "applied": False}
         self.robot.set_target_joint(q)
@@ -506,6 +641,10 @@ class RobotServer:
         Also held while paused: a gripper that closes on a paused arm is as
         much of a surprise as one that moves.
         """
+        if self.takeover is not None and self.takeover.active:
+            # The operator's button owns the gripper during a takeover;
+            # a policy closing it mid-intervention would fight them for it.
+            return {"ok": True, "takeover": True, "applied": False}
         if self.paused:
             return {"ok": True, "paused": True, "applied": False}
         self.gripper.set_target(float(np.clip(value, 0.0, 1.0)))
@@ -561,6 +700,7 @@ def build_app(server: RobotServer) -> Flask:
             "ctrl_space": getattr(server, "ctrl_space", None),
             "cameras": getattr(server, "camera_names", []),
             "inhand_camera": getattr(server, "inhand_camera", None),
+            "takeover": server.takeover_status(),
         })
 
     def _fail(exc):
@@ -643,6 +783,28 @@ def build_app(server: RobotServer) -> Flask:
             return jsonify({"ok": False, "error": f"{cam} has no frame yet"}), 503
         return Response(jpeg, mimetype="image/jpeg",
                         headers={"Cache-Control": "no-store"})
+
+    @app.route("/takeover", methods=["GET", "POST"])
+    def takeover():
+        try:
+            if request.method == "GET":
+                return jsonify(server.takeover_status())
+            body = request.get_json(silent=True) or {}
+            return jsonify(server.set_takeover(bool(body.get("on", True))))
+        except Exception as e:
+            # A readable reason beats Flask's 500 page: this is the endpoint a
+            # panel button calls, and the panel shows what comes back.
+            return jsonify({"active": False, "error": repr(e)}), 200
+
+    @app.route("/overlay", methods=["GET", "POST"])
+    def overlay():
+        frame = (request.args.get("frame")
+                 or (request.get_json(silent=True) or {}).get("frame")
+                 or "fingertip")
+        if frame not in ("fingertip", "ee"):
+            return jsonify({"ok": False,
+                            "error": f"frame must be fingertip or ee, got {frame!r}"}), 400
+        return jsonify(server.tool_overlay(frame))
 
     @app.route("/cameras/status", methods=["GET", "POST"])
     def cameras_status():
@@ -756,10 +918,17 @@ def parse_args():
                         "name=serial@WxH[+depth][,...]  e.g. "
                         "cam1=239222303046@848x480,cam4=218722271574@480x270. "
                         "Depth is off unless +depth, matching the launch file.")
+    p.add_argument("--takeover-speed", type=float, default=1.0, metavar="X",
+                   help="scale the spacemouse gain used by the panel's Take "
+                        "over button. 1.0 is exactly what "
+                        "deploy/deploy_spacemouse.py uses")
     p.add_argument("--inhand-camera", default=None,
                    help="Which camera is the in-hand one "
                         "(default: inhand_camera from config/cameras.yaml)")
-    p.add_argument("--compliance", choices=["normal", "compliant"], default="normal",
+    p.add_argument("--compliance",
+                   choices=["normal", "compliant", "damped",
+                            "stiff1000", "stiff1500"],
+                   default="normal",
                    help="'compliant' caps the force the controller applies "
                         "against an obstruction (20 N instead of 100 N in "
                         "cartesian, 3 N.m instead of 5 in joint), so a slow "
@@ -833,6 +1002,7 @@ def main():
             camera_serials=parse_camera_serials(args.camera_serials),
             ctrl_space=args.ctrl_space,
             compliance=args.compliance,
+            takeover_speed=args.takeover_speed,
             ft_sensor=args.ft_sensor_on,
             do_home=args.home and not args.no_home,
             gripper_stroke_mm=args.gripper_stroke_mm,
