@@ -281,6 +281,7 @@ class RobotServer:
                 from control.takeover import SpacemouseTakeover
                 self.takeover = SpacemouseTakeover(
                     robot=self.robot, gripper=self.gripper,
+                    control_space=self.ctrl_space,
                     speed=self.takeover_speed)
             status = self.takeover.start()
             if status.get("error"):

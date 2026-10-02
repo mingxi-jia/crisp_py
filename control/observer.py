@@ -7,12 +7,12 @@ convention changed, and no shared notion of "this frame is too old to use".
 
     from control.observer import Observer
 
-    obs_source = Observer(backend="ros", cameras=["cam1", "cam4"])
+    obs_source = Observer(backend="ros", cameras=["cam1", "cam4"])   # ROS topic names
     obs_source.wait_until_ready()
 
     state = obs_source.get_state()        # proprioception only, cheap
     obs   = obs_source.get_obs()          # + camera frames
-    rgb   = obs.rgb("cam1")               # None if that camera is stale
+    rgb   = obs.rgb("agentview")          # None if that camera is stale
 
 Backends, swapped with one argument:
 
@@ -274,6 +274,8 @@ class Observer:
         if backend not in BACKENDS:
             raise ValueError(f"backend must be one of {BACKENDS}, got {backend!r}")
         self.backend = backend
+        # "cam4" only as the last resort: it is the ROS backend's topic name.
+        # The realsense backend takes the name from config/cameras.yaml below.
         self.inhand_camera = inhand_camera or "cam4"
         self.max_age = max_age
         self._client = None

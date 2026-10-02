@@ -48,6 +48,67 @@
          pointer-events:none;border-radius:2px;display:none}
   .two{display:grid;gap:18px;grid-template-columns:1fr}
   @media(min-width:1100px){.two{grid-template-columns:2fr 1fr}}
+
+  /* task */
+  .task{display:flex;gap:10px;align-items:center;padding:12px 14px;flex-wrap:wrap}
+  .task input{flex:1;min-width:260px;font:13px var(--mono);color:var(--fg);
+              background:#10131a;border:1px solid var(--line);border-radius:7px;
+              padding:9px 12px}
+  .task input:focus{outline:none;border-color:var(--accent)}
+  .task .state{font:11px var(--mono);color:var(--muted);white-space:nowrap}
+  .mic{width:10px;height:10px;border-radius:50%;background:var(--muted);
+       flex:none;transition:background .15s,box-shadow .15s}
+  .mic.on{background:var(--ok)}
+  .mic.hot{background:var(--accent);box-shadow:0 0 0 4px rgba(79,195,247,.25)}
+  .mic.talking{background:var(--warn);box-shadow:0 0 0 4px rgba(255,152,0,.25)}
+  .mic.bad{background:var(--err)}
+  .heard{font:11px var(--mono);color:var(--accent);overflow:hidden;
+         text-overflow:ellipsis;white-space:nowrap}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 12px}
+  .chips button{font:11px var(--mono);padding:4px 10px;border-radius:999px;
+                color:var(--muted);max-width:100%;overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap}
+  .chips button:hover{color:var(--fg)}
+  .chips .none{font:11px var(--mono);color:var(--muted);padding:4px 0}
+
+  /* action prediction */
+  .pred{display:grid;gap:1px;background:var(--line);grid-template-columns:1fr}
+  @media(min-width:900px){.pred{grid-template-columns:330px 1fr}}
+  .pred>div{background:var(--panel);padding:12px 14px;min-width:0}
+  .subhead{font:11px var(--mono);color:var(--muted);margin:0 0 10px;
+           display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .subhead b{color:var(--fg);font-weight:600}
+  .bars{display:grid;gap:5px}
+  .bar{display:grid;grid-template-columns:24px 1fr 52px 64px;gap:8px;
+       align-items:center;font:11px var(--mono)}
+  .bar .lab{color:var(--muted)}
+  .bar .val{text-align:right}
+  .bar .rad{text-align:right;color:var(--muted)}
+  .track{position:relative;height:15px;background:#10131a;
+         border:1px solid var(--line);border-radius:3px;overflow:hidden}
+  .track .mid{position:absolute;left:50%;top:0;bottom:0;width:1px;background:#333a49}
+  .track .raw{position:absolute;top:0;bottom:0;opacity:.30}
+  .track .cmd{position:absolute;top:3px;bottom:3px;border-radius:2px}
+  .grip{display:grid;grid-template-columns:24px 1fr;gap:8px;align-items:center;
+        margin-top:10px;padding-top:10px;border-top:1px solid var(--line);
+        font:11px var(--mono)}
+  .gripstate{display:flex;align-items:center;gap:8px}
+  .gripbadge{padding:2px 9px;border-radius:999px;font-size:10px;letter-spacing:.05em}
+  .stage{position:relative;width:100%;margin:0 auto;background:#000;
+         border-radius:5px;overflow:hidden;aspect-ratio:1}
+  .tabs{display:inline-flex;border:1px solid var(--line);border-radius:6px;
+        overflow:hidden;margin-left:auto}
+  .tabs button{border:none;border-radius:0;padding:3px 10px;font-size:11px;
+               background:#10131a;color:var(--muted)}
+  .tabs button[aria-pressed="true"]{background:#2b3143;color:var(--fg)}
+  .stage img,.stage canvas{position:absolute;inset:0;width:100%;height:100%}
+  .stage img{image-rendering:pixelated}
+  .stage canvas{cursor:crosshair}
+  .legend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:9px;
+          font:10px var(--mono);color:var(--muted)}
+  .legend i{display:inline-block;width:11px;height:3px;border-radius:2px;
+            margin-right:5px;vertical-align:middle}
+  .legend i.dot{width:8px;height:8px;border-radius:50%}
 </style>
 </head>
 <body>
@@ -58,14 +119,73 @@
   <span class="pill" id="basis-pill">PCA basis —</span>
   <span class="spacer"></span>
   <span class="pill" id="hint">click a patch in a PCA map</span>
+  <label class="pill" style="cursor:pointer"><input type="checkbox" id="show-samples" checked> samples</label>
   <button id="refit">Refit PCA</button>
 </header>
 
 <main>
   <section class="card">
+    <h2>Task</h2>
+    <div class="task">
+      <input id="task-input" placeholder="type a task and press Enter"
+             autocomplete="off" spellcheck="false" list="task-list">
+      <datalist id="task-list"></datalist>
+      <span class="state" id="task-state"></span>
+    </div>
+    <div class="task" id="mic-row" style="display:none;padding-top:0">
+      <span class="mic" id="mic-dot"></span>
+      <span class="state" id="mic-state"></span>
+      <span class="heard" id="mic-heard"></span>
+    </div>
+    <div class="chips" id="task-history"></div>
+  </section>
+
+  <section class="card">
     <h2>Observation &amp; features</h2>
     <div class="cams" id="cams"></div>
     <div class="note" id="featnote"></div>
+  </section>
+
+  <section class="card">
+    <h2>Action prediction</h2>
+    <div class="pred">
+      <div>
+        <p class="subhead"><b id="ap-when">current step</b>
+          <span id="ap-scale"></span></p>
+        <div class="bars" id="ap-bars"></div>
+        <div class="grip">
+          <span class="lab">grip</span>
+          <span class="gripstate">
+            <span class="gripbadge" id="ap-gripbadge">—</span>
+            <span id="ap-griptext"></span>
+          </span>
+        </div>
+      </div>
+      <div>
+        <p class="subhead"><b>where it is about to go</b>
+          <span id="ap-chunkinfo">—</span>
+          <span class="tabs" id="ap-tabs"></span></p>
+        <p class="subhead"><span id="ap-spread"></span></p>
+        <div class="stage" id="ap-stage">
+          <img id="ap-img">
+          <canvas id="ap-ovl"></canvas>
+        </div>
+        <div class="legend"><span id="ap-view"></span>
+          <span id="ap-note-cams"></span></div>
+        <div class="legend" id="ap-legend"></div>
+      </div>
+    </div>
+    <div class="note" id="ap-note">The path is the action chunk run through
+      forward kinematics and the camera calibration: joint velocities → joint
+      targets → fingertip poses → pixels in the very image the policy was
+      shown. Solid is the part that will actually be executed; dashed is the
+      tail past <code>--open-loop-horizon</code>, re-predicted before it is
+      reached. The faint blue lines are other plans the policy sampled for the
+      same observation — it draws from noise, so they differ, and their fan is
+      its own uncertainty rather than anything about the scene. Hover a node to
+      read the joint command behind it. Faint bars are
+      the raw normalised velocity, solid bars what was commanded after
+      <code>--speed-scale</code> and the <code>--max-step-rad</code> cap.</div>
   </section>
 
   <div class="two">
@@ -136,6 +256,348 @@ function simColor(v) {
   const t = Math.max(-1, Math.min(1, v));
   return t >= 0 ? [Math.round(247*t), Math.round(195*t), Math.round(79*t)]
                 : [0, Math.round(90*-t), Math.round(200*-t)];
+}
+
+// ---- action prediction ----------------------------------------------------
+// One colour per joint, reused by the bars, the chunk lines and the legend, so
+// a joint is the same colour everywhere on the page.
+const JOINT_COLORS = ["#4fc3f7","#81c784","#ffb74d","#e57373",
+                      "#ba68c8","#4db6ac","#f06292"];
+const GRIP_COLOR = "#f5f5f5";
+let prediction = null;   // last {chunk, cursor, horizon, ...} from /state
+let liveAction = null;   // last executed action, for the default bar view
+let hoverStep = null;    // chunk row under the pointer, or null
+let overlayData = null;  // projected trajectory, or null if uncalibrated
+let overlayNote = "";    // why there is no trajectory, when there is none
+let showSamples = true;  // draw the other plans sampled for this observation
+let sampleStatus = null; // whether several plans were asked for, and available
+let view = null;         // key into overlay.views: "<camera>:raw" | ":obs"
+let L_RATE = 15;         // control rate, for turning steps into seconds
+let activePrompt = "";   // the task the policy is running right now
+
+// Mirrors policy.joint_velocity_to_delta + --speed-scale + --max-step-rad, so
+// hovering a *future* chunk row shows the motion it would actually produce
+// rather than the raw number.
+function commandedDelta(vel, pred) {
+  const stepRad = pred ? pred.step_rad : 0.2;
+  const cap = pred ? pred.max_step_rad : 0.2;
+  let m = 0;
+  for (const v of vel) m = Math.max(m, Math.abs(v));
+  const norm = m > 1 ? 1/m : 1;
+  return vel.map(v => Math.max(-cap, Math.min(cap, v * norm * stepRad)));
+}
+
+function renderBars(vel, gripDroid, delta, label) {
+  $("ap-when").textContent = label;
+  const host = $("ap-bars");
+  if (!vel) { host.innerHTML = '<span class="lab">no action yet</span>'; return; }
+  // Both series live in normalised units: delta/0.2 rad is the commanded step
+  // expressed as the fraction of a full-scale DROID tick it really is.
+  const cmd = delta.map(d => d / 0.2);
+  if (host.children.length !== vel.length) {
+    host.innerHTML = vel.map((_, j) => `
+      <div class="bar">
+        <span class="lab">J${j+1}</span>
+        <span class="track"><span class="mid"></span>
+          <span class="raw" id="ap-raw-${j}"></span>
+          <span class="cmd" id="ap-cmd-${j}"></span></span>
+        <span class="val" id="ap-val-${j}"></span>
+        <span class="rad" id="ap-rad-${j}"></span>
+      </div>`).join("");
+  }
+  for (let j = 0; j < vel.length; j++) {
+    const c = JOINT_COLORS[j % JOINT_COLORS.length];
+    for (const [id, v] of [[`ap-raw-${j}`, vel[j]], [`ap-cmd-${j}`, cmd[j]]]) {
+      const el = $(id);
+      const w = Math.min(1, Math.abs(v)) * 50;
+      el.style.left = v >= 0 ? "50%" : `${50 - w}%`;
+      el.style.width = `${w}%`;
+      el.style.background = c;
+    }
+    $(`ap-val-${j}`).textContent = vel[j].toFixed(3);
+    $(`ap-val-${j}`).style.color = Math.abs(vel[j]) > 0.95 ? "var(--warn)" : "var(--fg)";
+    $(`ap-rad-${j}`).textContent = `${delta[j] >= 0 ? "+" : ""}${delta[j].toFixed(3)} rad`;
+  }
+  const closed = gripDroid != null && gripDroid > 0.5;
+  const badge = $("ap-gripbadge");
+  badge.textContent = gripDroid == null ? "—" : (closed ? "CLOSED" : "OPEN");
+  badge.style.background = gripDroid == null ? "#10131a" : (closed ? "#3a2a12" : "#122c1a");
+  badge.style.color = gripDroid == null ? "var(--muted)" : (closed ? "var(--warn)" : "var(--ok)");
+  $("ap-griptext").textContent = gripDroid == null ? ""
+    : `${gripDroid.toFixed(2)} DROID · ${(1 - gripDroid).toFixed(2)} crisp`;
+}
+
+function drawOverlay() {
+  const cv = $("ap-ovl");
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)) {
+    cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+
+  const O = overlayData;
+  if (!O) {
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.font = "11px ui-monospace,monospace"; ctx.textAlign = "center";
+    ctx.fillText(overlayNote || "no trajectory", w/2, h/2);
+    return;
+  }
+  const V = currentView(O);
+  if (!V) return;
+  // Normalised coordinates so the same payload draws at any display size.
+  const pts = V.path.map(([u, v]) => [u*w, v*h]);
+
+  // The other plans the policy sampled for this same observation, drawn
+  // first so the one being executed sits on top of them. Their fan is the
+  // policy's uncertainty; a tight bundle means it is sure.
+  if (showSamples && V.samples && V.samples.length > 1) {
+    // Dark backing under each, as with the executed path: a thin bright line
+    // on a bright object is invisible, and these are the lines most likely to
+    // cross something pale.
+    for (const [colour, width] of [["rgba(0,0,0,.45)", 4.5],
+                                   ["rgba(79,195,247,.62)", 2.6]]) {
+      ctx.strokeStyle = colour; ctx.lineWidth = width;
+      for (const sample of V.samples) {
+        ctx.beginPath();
+        sample.forEach(([u, v], i) =>
+          i ? ctx.lineTo(u*w, v*h) : ctx.moveTo(u*w, v*h));
+        ctx.stroke();
+      }
+    }
+    // Their endpoints, where the disagreement is largest.
+    for (const sample of V.samples) {
+      const [u, v] = sample[Math.min(sample.length - 1, O.horizon)];
+      ctx.beginPath(); ctx.arc(u*w, v*h, 3.4, 0, 7);
+      ctx.fillStyle = "rgba(79,195,247,.9)"; ctx.fill();
+      ctx.lineWidth = 1; ctx.strokeStyle = "rgba(0,0,0,.5)"; ctx.stroke();
+    }
+  }
+  const n = pts.length;
+  // path[k] is the pose after chunk step k-1, so the executed part of the
+  // plan ends one node past the horizon.
+  const stop = Math.min(n - 1, O.horizon);
+
+  // Every stroke gets a dark backing: the image underneath can be any colour,
+  // and a thin bright line on a bright object is invisible.
+  const stroke = (from, to, color, width, dash) => {
+    for (const [c, lw] of [["rgba(0,0,0,.55)", width + 2.2], [color, width]]) {
+      ctx.strokeStyle = c; ctx.lineWidth = lw;
+      ctx.setLineDash(dash && c !== "rgba(0,0,0,.55)" ? dash : []);
+      ctx.beginPath();
+      ctx.moveTo(pts[from][0], pts[from][1]);
+      for (let i = from + 1; i <= to; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  };
+  if (stop > 0) stroke(0, stop, "#ffffff", 2.6, null);
+  if (stop < n - 1) stroke(stop, n - 1, "rgba(255,255,255,.55)", 2, [5, 4]);
+
+  // Fingertip frame at the pose the plan starts from: which way the gripper
+  // is pointing is most of what you want to know before it moves.
+  // What the policy is actually shown, on the raw frame: everything outside
+  // this box is cropped away before inference.
+  if (V.crop) {
+    const [cx0, cy0, cx1, cy1] = V.crop;
+    ctx.strokeStyle = "rgba(255,255,255,.45)"; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.strokeRect(cx0*w, cy0*h, (cx1-cx0)*w, (cy1-cy0)*h);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "rgba(255,255,255,.45)";
+    ctx.font = "9px ui-monospace,monospace";
+    ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+    ctx.fillText("policy crop", cx0*w + 3, cy0*h - 2);
+  }
+
+  if (V.axes) {
+    const o = pts[0];
+    V.axes.forEach(([u, v], i) => {
+      const c = ["#ff5252", "#69f0ae", "#40c4ff"][i];
+      for (const [col, lw] of [["rgba(0,0,0,.55)", 4], [c, 2]]) {
+        ctx.strokeStyle = col; ctx.lineWidth = lw;
+        ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(u*w, v*h); ctx.stroke();
+      }
+    });
+  }
+
+  // One node per step, coloured by the gripper command at that step.
+  for (let i = 0; i < n; i++) {
+    const closed = O.gripper[i] > 0.5;
+    ctx.beginPath(); ctx.arc(pts[i][0], pts[i][1], i === 0 ? 4.5 : 3.2, 0, 7);
+    ctx.fillStyle = closed ? "#ffb74d" : "#81c784";
+    ctx.globalAlpha = i <= stop ? 1 : 0.55;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.stroke();
+  }
+
+  // Where the arm actually is now. The image is from the last inference, so
+  // this sits ahead of the gripper in the picture by however far the chunk
+  // has been executed -- that gap is the open-loop lag, not an error.
+  if (V.now && O.now_front) {
+    const [x, y] = [V.now[0]*w, V.now[1]*h];
+    for (const [c, lw] of [["rgba(0,0,0,.6)", 3.5], ["#4fc3f7", 1.8]]) {
+      ctx.strokeStyle = c; ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(x - 7, y); ctx.lineTo(x + 7, y);
+      ctx.moveTo(x, y - 7); ctx.lineTo(x, y + 7);
+      ctx.stroke();
+    }
+  }
+
+  if (hoverStep != null) {
+    const i = Math.min(n - 1, hoverStep + 1);
+    ctx.strokeStyle = "#4fc3f7"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(pts[i][0], pts[i][1], 7, 0, 7); ctx.stroke();
+  }
+}
+
+function refreshPrediction() {
+  const P = prediction;
+  if (P && hoverStep != null) {
+    const vel = P.chunk[hoverStep].slice(0, 7);
+    let g = P.chunk[hoverStep][7];
+    if (P.binarized) g = g > 0.5 ? 1 : 0;
+    const ahead = hoverStep - P.cursor;
+    const when = ahead === 0 ? "now" :
+      (ahead > 0 ? `+${ahead} step${ahead > 1 ? "s" : ""} (${(ahead / (L_RATE || 15)).toFixed(2)} s)`
+                 : `${ahead} steps`);
+    renderBars(vel, g, commandedDelta(vel, P), `chunk step ${hoverStep} · ${when}`);
+  } else if (liveAction) {
+    renderBars(liveAction.velocity, liveAction.gripper_droid,
+               liveAction.delta_rad, "current step");
+  } else {
+    renderBars(null);
+  }
+  $("ap-chunkinfo").textContent = !P ? "—"
+    : `${P.chunk.length} steps · executing ${Math.min(P.index, P.horizon)}/${P.horizon}`
+      + (P.horizon < P.chunk.length ? ` · ${P.chunk.length - P.horizon} discarded` : "")
+      + (overlayData && overlayData.fk_residual_mm != null
+         ? ` · FK ${overlayData.fk_residual_mm.toFixed(1)} mm` : "");
+  const n = overlayData && overlayData.n_samples;
+  const S = sampleStatus || {};
+  let text = "", warn = false;
+  if (n > 1) {
+    text = `${n} plans · they disagree by ${overlayData.spread_mm} mm at the horizon`;
+    warn = overlayData.spread_mm > 30;
+  } else if (S.requested > 1 && !S.asked) {
+    text = `--samples ${S.requested}: waiting for the first inference`;
+  } else if (S.requested > 1 && !S.available) {
+    // An empty fan is most often a server that cannot sample. Say so here
+    // rather than only in the startup scroll.
+    text = `asked for ${S.asked} plans, the server returned none: it does `
+         + `not offer sampled plans (deploy/pi05_policy_server.py, --max-samples).`;
+    warn = true;
+  } else if (S.requested > 1 && S.every > 1) {
+    text = `waiting for the next sampled inference (every ${S.every})`;
+  }
+  $("ap-spread").textContent = text;
+  $("ap-spread").style.color = warn ? "var(--warn)" : "var(--muted)";
+  $("ap-note-cams").textContent = !overlayData ? overlayNote
+    : `drawn for ${(overlayData.cameras || [overlayData.camera]).join(", ")}`;
+  drawOverlay();
+}
+
+// ---- task ----------------------------------------------------------------
+// Type and press Enter. The policy picks the new task up at the top of its
+// next step, so there is a moment where the chunk in flight still belongs to
+// the old one: `queued` says so rather than pretending it is instant.
+let historyKey = "";
+
+async function sendPrompt(text) {
+  text = (text || "").trim();
+  if (!text) return;
+  $("task-state").textContent = "sending…";
+  try {
+    const r = await fetch("/prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: text }),
+    });
+    const out = await r.json();
+    if (!out.ok) { $("task-state").textContent = out.error || "refused"; return; }
+    renderHistory(out.history);
+  } catch (e) {
+    $("task-state").textContent = "the rollout is not answering";
+  }
+}
+
+$("task-input").addEventListener("keydown", ev => {
+  if (ev.key === "Enter") { ev.preventDefault(); sendPrompt(ev.target.value); }
+  // Escape puts back whatever is actually running, so a half-typed idea can
+  // be abandoned without having to remember what was there.
+  if (ev.key === "Escape") { ev.target.value = activePrompt; ev.target.blur(); }
+});
+
+// The microphone, when there is one. Level against threshold is what tells
+// "too quiet" from "not working" -- both look like silence otherwise.
+function renderMic(sp) {
+  $("mic-row").style.display = sp ? "flex" : "none";
+  if (!sp) return;
+  const dot = $("mic-dot");
+  const hot = sp.level > sp.threshold;
+  dot.className = "mic " + (sp.error ? "bad" : sp.muted ? "talking"
+                            : hot ? "hot" : sp.active ? "on" : "");
+  const meter = sp.threshold > 0
+    ? Math.min(9, Math.round(9 * sp.level / (sp.threshold * 2))) : 0;
+  $("mic-state").textContent = sp.error ? sp.error
+    : sp.muted ? "speaking — not listening"
+    : `${sp.state} · ${"▁▂▃▄▅▆▇██".slice(0, Math.max(1, meter))}`
+      + ` · say "${sp.terminator}" to send, "${sp.cancel}" to take it back`;
+  $("mic-state").style.color = sp.error ? "var(--err)" : "var(--muted)";
+  // The buffer is what will be sent; `heard` is the last thing transcribed,
+  // which is how a mis-hearing shows up before the terminator commits it.
+  $("mic-heard").textContent = sp.buffer ? `"${sp.buffer}…"`
+    : (sp.heard ? `heard: "${sp.heard}"` : "");
+}
+
+function renderHistory(entries) {
+  const key = (entries || []).map(e => e.prompt).join("\u0000");
+  if (key === historyKey) return;
+  historyKey = key;
+  const host = $("task-history");
+  if (!entries || !entries.length) {
+    host.innerHTML = '<span class="none">no earlier tasks</span>';
+    $("task-list").innerHTML = "";
+    return;
+  }
+  host.innerHTML = entries.map((e, i) =>
+    `<button data-i="${i}" title="used ${e.count}x">${escapeHtml(e.prompt)}</button>`
+  ).join("");
+  for (const b of host.querySelectorAll("button")) {
+    b.addEventListener("click", () => {
+      const text = entries[+b.dataset.i].prompt;
+      $("task-input").value = text;
+      sendPrompt(text);
+    });
+  }
+  // Native autocomplete on the input, from the same list.
+  $("task-list").innerHTML = entries
+    .map(e => `<option value="${escapeHtml(e.prompt)}">`).join("");
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function buildLegend() {
+  $("ap-legend").innerHTML = [
+    ['<i style="background:#ffffff"></i>', "executed"],
+    ['<i style="background:rgba(255,255,255,.5)"></i>', "re-planned"],
+    ['<i class="dot" style="background:#81c784"></i>', "gripper open"],
+    ['<i class="dot" style="background:#ffb74d"></i>', "gripper closed"],
+    ['<i class="dot" style="background:#4fc3f7"></i>', "arm now"],
+    ['<i style="background:rgba(79,195,247,.5)"></i>', "other samples"],
+    ['<i style="background:#ff5252"></i>', "x"],
+    ['<i style="background:#69f0ae"></i>', "y"],
+    ['<i style="background:#40c4ff"></i>', "z"],
+  ].map(([i, t]) => `<span>${i}${t}</span>`).join("");
 }
 
 function buildCameraCard(name) {
@@ -221,13 +683,47 @@ async function poll() {
 
     const o = s.obs || {}, f = s.features || {}, a = s.action, L = s.loop || {};
     $("p-prompt").textContent = s.prompt ? `"${s.prompt}"` : "(empty)";
+
+    activePrompt = s.prompt_active || "";
+    // Never overwrite what someone is in the middle of typing.
+    if (document.activeElement !== $("task-input")) $("task-input").value = activePrompt;
+    $("task-state").textContent = s.prompt_pending
+      ? `queued: "${s.prompt_pending}"`
+      : (s.prompt === activePrompt ? "running" : "taking effect…");
+    $("task-state").style.color =
+      s.prompt_pending || s.prompt !== activePrompt ? "var(--warn)" : "var(--muted)";
+    renderHistory(s.prompt_history);
+    renderMic(s.speech);
     $("p-grip").textContent = o.gripper_droid == null ? "—"
       : `${o.gripper_droid.toFixed(2)} (${o.gripper_droid > .5 ? "closed" : "open"})`;
     $("p-vmax").textContent = a ? a.velocity_absmax.toFixed(3) : "—";
     $("p-infer").textContent = L.inference_ms
       ? `${L.inference_ms.toFixed(0)} ms · ${L.n_inferences}x` : "—";
-    $("p-step").textContent = `${L.step}/${L.max_steps} · ${L.chunk_index}/${L.open_loop_horizon}`;
+    $("p-step").textContent =
+      `${L.step}${L.max_steps > 0 ? "/" + L.max_steps : ""}`
+      + ` · ${L.chunk_index}/${L.open_loop_horizon}`;
     $("p-speed").textContent = `${L.speed_scale}x @ ${L.rate_hz} Hz${L.dry_run ? " · DRY RUN" : ""}`;
+    L_RATE = L.rate_hz || 15;
+
+    prediction = s.prediction || null;
+    liveAction = a || null;
+    overlayData = s.overlay || null;
+    sampleStatus = s.samples || null;
+    overlayNote = overlayData ? ""
+      : `no calibration for ${o.external_camera || "the exterior camera"}`;
+    // Each view names the image it belongs on; fall back to the exterior
+    // observation so the pane is never blank before the first chunk.
+    const V = currentView(overlayData);
+    const shot = (V && o[V.image]) || o.exterior_jpeg;
+    if (shot) $("ap-img").src = "data:image/jpeg;base64," + shot;
+    applyView();
+    $("ap-scale").textContent = prediction
+      ? `full scale = ${prediction.step_rad.toFixed(3)} rad/step, cap ${prediction.max_step_rad.toFixed(3)}`
+      : "";
+    // A hover into a chunk that has since shrunk would index past its end.
+    if (prediction && hoverStep != null)
+      hoverStep = Math.min(hoverStep, prediction.chunk.length - 1);
+    refreshPrediction();
 
     const jpegs = { exterior: o.exterior_jpeg, wrist: o.wrist_jpeg };
     const fits  = { exterior: o.exterior_fit,  wrist: o.wrist_fit };
@@ -263,11 +759,82 @@ async function poll() {
   }
 }
 
+$("show-samples").addEventListener("change", ev => {
+  showSamples = ev.target.checked;
+  drawOverlay();
+});
+
 $("refit").addEventListener("click", async () => {
   await fetch("/refit", { method: "POST" });
   $("basis-pill").textContent = "PCA basis refitting…";
 });
 
+// The views are whatever cameras turned out to be calibrated, so the tabs are
+// built from the payload rather than hard-coded: adding a calibration entry
+// adds a tab and nothing here changes.
+function currentView(O) {
+  if (!O) return null;
+  if (!view || !O.views[view]) view = O.order[0];
+  return O.views[view];
+}
+
+function buildTabs(O) {
+  const host = $("ap-tabs");
+  const wanted = O ? O.order.join("|") : "";
+  if (host.dataset.keys !== wanted) {
+    host.dataset.keys = wanted;
+    host.innerHTML = !O ? "" : O.order.map(k => {
+      const [cam, kind] = k.split(":");
+      return `<button data-view="${k}">${cam} ${kind === "raw" ? "raw" : "input"}</button>`;
+    }).join("");
+    for (const b of host.querySelectorAll("button")) {
+      b.addEventListener("click", () => {
+        if (view === b.dataset.view) return;
+        view = b.dataset.view;
+        poll();             // each view draws on a different image
+      });
+    }
+  }
+  for (const b of host.querySelectorAll("button"))
+    b.setAttribute("aria-pressed", String(b.dataset.view === view));
+}
+
+function applyView() {
+  const V = currentView(overlayData);
+  buildTabs(overlayData);
+  // The stage is square for the policy input and the frame's own shape for a
+  // raw view; letting it stretch would move every drawn point off its pixel.
+  $("ap-stage").style.aspectRatio = V ? V.aspect : 1;
+  $("ap-view").textContent = V ? V.label : "";
+  drawOverlay();
+}
+
+// Hovering a node on the path swaps the bars to that step, so the joint
+// command behind any part of the trajectory can be read off the image.
+$("ap-ovl").addEventListener("mousemove", ev => {
+  if (!overlayData || !prediction) return;
+  const r = ev.target.getBoundingClientRect();
+  const x = (ev.clientX - r.left) / r.width, y = (ev.clientY - r.top) / r.height;
+  let best = null, bestD = Infinity;
+  const V = currentView(overlayData);
+  if (!V) return;
+  V.path.forEach(([u, v], i) => {
+    const d = (u-x)*(u-x) + (v-y)*(v-y);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  // Node 0 is the pose the plan starts from; node k is after chunk step k-1.
+  const step = best === null || bestD > 0.01 ? null
+    : Math.min(prediction.chunk.length - 1, Math.max(0, best - 1));
+  if (step !== hoverStep) { hoverStep = step; refreshPrediction(); }
+});
+$("ap-ovl").addEventListener("mouseleave", () => {
+  if (hoverStep != null) { hoverStep = null; refreshPrediction(); }
+});
+addEventListener("resize", drawOverlay);
+
+buildLegend();
+applyView();
+refreshPrediction();
 poll();
 setInterval(poll, 500);
 </script>

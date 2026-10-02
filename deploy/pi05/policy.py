@@ -169,8 +169,8 @@ class Pi05DroidPolicy:
                  host: str = "0.0.0.0",
                  port: int = 8000,
                  prompt: str = "",
-                 external_camera: str = "cam1",
-                 wrist_camera: str = "cam4",
+                 external_camera: str = "agentview",
+                 wrist_camera: str = "inhand",
                  open_loop_horizon: int = 8,
                  exterior_fit: str = "box",
                  wrist_fit: str = "pad",
@@ -178,6 +178,8 @@ class Pi05DroidPolicy:
                  wrist_box=None,
                  binarize_gripper: bool = True,
                  want_features: bool = False,
+                 n_samples: int = 1,
+                 samples_every: int = 1,
                  speed_scale: float = 1.0,
                  max_step_rad: float = MAX_JOINT_DELTA,
                  api_key: str | None = None):
@@ -196,6 +198,13 @@ class Pi05DroidPolicy:
         # Ask the server for vision features only when something renders them.
         # They cost a second forward pass through the vision tower.
         self.want_features = bool(want_features)
+        # pi0.5 samples its plan from noise, so asking twice gives two
+        # different plans. Drawing several shows where the policy is unsure --
+        # at the price of a bigger batch on the GPU, so they are asked for
+        # only every `samples_every` inferences and the control chunk is
+        # always the first one returned.
+        self.n_samples = max(1, int(n_samples))
+        self.samples_every = max(1, int(samples_every))
         self.wrist_box = wrist_box
         self.binarize_gripper = binarize_gripper
         # Shrinks each step without changing the loop rate, so the policy keeps
@@ -242,6 +251,34 @@ class Pi05DroidPolicy:
         self.last_features = {}
         self.server_has_features = False
         self.last_feature_ms = None
+        self.last_frame_shapes = {}
+        self.last_raw_frames = {}
+        # (N, T, 8) when the server returned several plans for one
+        # observation, else None. Never used for control -- the executed chunk
+        # is samples[0], which the server guarantees.
+        self.last_samples = None
+        self.samples_asked = 0
+        self._pending_prompt = None
+        # What the server said at connect time. Only advisory: it is replaced
+        # by what actually comes back on the first sampled inference.
+        self.server_has_samples = bool(self.server_metadata.get("samples"))
+        if self.n_samples > 1 and not self.server_has_samples:
+            print(f"\n  NOTE: --samples {self.n_samples} may do nothing: this "
+                  f"policy server does not offer sampled plans "
+                  f"(metadata: {self.server_metadata or '{}'}).\n"
+                  f"  They are asked for anyway, in case the server was "
+                  f"restarted since. They come from "
+                  f"deploy/pi05_policy_server.py, run with --max-samples "
+                  f"{self.n_samples} or more:\n"
+                  f"      cd third_party/openpi\n"
+                  f"      uv run python ../../deploy/pi05_policy_server.py "
+                  f"--config pi05_droid \\\n"
+                  f"          --dir gs://openpi-assets/checkpoints/pi05_droid\n")
+        cap = int(self.server_metadata.get("max_samples") or 0)
+        if cap and self.n_samples > cap:
+            print(f"  NOTE: the server caps samples at {cap}; asking for that "
+                  f"instead of {self.n_samples}.")
+            self.n_samples = cap
 
     # -- lifecycle -------------------------------------------------------
     def reset(self, obs=None):
@@ -250,8 +287,73 @@ class Pi05DroidPolicy:
         self._chunk_index = 0
 
     def set_prompt(self, prompt: str):
+        """Change the task now. Only safe from the control loop's own thread."""
         self.prompt = prompt
         self.reset()
+
+    def request_prompt(self, prompt: str) -> str:
+        """Ask for a new task from another thread (the panel).
+
+        Queued rather than applied: reset() clears the action chunk, and doing
+        that underneath predict_action -- which has already decided it does not
+        need to re-infer and is about to index into the chunk -- would crash the
+        rollout on a None. The control loop picks this up at the top of its
+        next step, within one tick.
+        """
+        prompt = str(prompt)
+        self._pending_prompt = prompt
+        return prompt
+
+    @property
+    def pending_prompt(self) -> str | None:
+        """A requested prompt that has not taken effect yet, else None."""
+        pending = self._pending_prompt
+        return None if pending is None or pending == self.prompt else pending
+
+    def _apply_pending_prompt(self) -> bool:
+        """Adopt a queued prompt. Called by the control loop, nobody else."""
+        pending = self._pending_prompt
+        self._pending_prompt = None
+        if pending is None or pending == self.prompt:
+            return False
+        # The chunk in flight was planned for the old task, so drop it: the
+        # next step re-infers against the new one rather than finishing a
+        # motion nobody asked for any more.
+        self.set_prompt(pending)
+        return True
+
+    def _samples_due(self) -> int:
+        """How many plans to ask for on the next inference.
+
+        Deliberately not gated on what the server's metadata said: that is read
+        once at connect time, so a server restarted underneath a running
+        rollout would leave this client believing sampling is unavailable
+        forever, with no way to find out otherwise. Unknown request keys are
+        ignored by every server here, so asking costs nothing and the answer
+        is learned from what comes back.
+        """
+        if self.n_samples <= 1:
+            return 1
+        return self.n_samples if (self.n_inferences % self.samples_every) == 0 else 1
+
+    @property
+    def needs_inference(self) -> bool:
+        """Whether the next predict_action will query the server.
+
+        The control loop asks this to decide whether to fetch camera frames:
+        /get_obs costs about ten times /get_state, so a step that is only
+        replaying an existing chunk reads proprioception alone. That makes
+        this the *contract* between loop and policy, not an internal detail --
+        when the two disagree, predict_action gets a state-only reading and
+        cannot build a request from it.
+
+        A queued prompt counts. It drops the chunk when it is applied, which
+        means an inference, which means the loop has to have fetched images.
+        """
+        return (self.pending_prompt is not None
+                or self._chunk is None
+                or self._chunk_index >= self.open_loop_horizon
+                or self._chunk_index >= len(self._chunk))
 
     # -- observation -----------------------------------------------------
     def build_request(self, obs) -> dict:
@@ -259,6 +361,15 @@ class Pi05DroidPolicy:
 
         Keys come from openpi/src/openpi/policies/droid_policy.py.
         """
+        if not hasattr(obs, "rgb"):
+            # A state-only reading, which means the caller decided no
+            # inference was due and then one turned out to be. Say what the
+            # contract is rather than dying on a missing attribute.
+            raise RuntimeError(
+                f"an inference is due but this is a {type(obs).__name__} with "
+                f"no camera frames. The control loop must fetch get_obs() "
+                f"whenever policy.needs_inference is True -- not re-derive "
+                f"that condition, which is how the two come apart.")
         exterior = obs.rgb(self.external_camera)
         wrist = obs.rgb(self.wrist_camera)
 
@@ -283,6 +394,17 @@ class Pi05DroidPolicy:
         if obs.gripper_value is None:
             raise RuntimeError("gripper value unavailable; cannot build state")
 
+        # Source resolution, kept because the panel's overlay has to undo
+        # fit_image to put a projected point back on the right pixel.
+        self.last_frame_shapes = {
+            "exterior": (exterior.shape[1], exterior.shape[0]),
+            "wrist": (wrist.shape[1], wrist.shape[0]),
+        }
+        # References, not copies: the panel draws the predicted path on the
+        # uncropped frame, where a trajectory that leaves --exterior-crop is
+        # still visible instead of silently clipped.
+        self.last_raw_frames = {"exterior": exterior, "wrist": wrist}
+
         return {
             "observation/exterior_image_1_left":
                 fit_image(exterior, self.exterior_fit, self.exterior_box),
@@ -296,6 +418,7 @@ class Pi05DroidPolicy:
             # Consumed by deploy/pi05_policy_server.py; openpi's own server
             # ignores unknown keys.
             "want_features": self.want_features,
+            "n_samples": self._samples_due(),
         }
 
     # -- policy ----------------------------------------------------------
@@ -303,8 +426,11 @@ class Pi05DroidPolicy:
         """Next action, querying the server only when the chunk runs out."""
         import time
 
-        if self._chunk is None or self._chunk_index >= self.open_loop_horizon \
-                or self._chunk_index >= len(self._chunk):
+        # A prompt change from the panel lands here, where nothing else is
+        # part-way through reading the chunk.
+        self._apply_pending_prompt()
+
+        if self.needs_inference:
             request = self.build_request(obs)
             self.last_request = request
             start = time.perf_counter()
@@ -312,6 +438,17 @@ class Pi05DroidPolicy:
             self.last_inference_ms = (time.perf_counter() - start) * 1000.0
             self.n_inferences += 1
 
+            samples = result.get("samples")
+            self.last_samples = (None if samples is None
+                                 else np.asarray(samples, dtype=np.float64))
+            # Observed, not advertised: whatever the metadata claimed, this is
+            # what the server actually does. `asked` is kept beside it so the
+            # panel can say "asked for 6, got none" rather than just showing
+            # an empty fan.
+            if request["n_samples"] > 1:
+                self.samples_asked = request["n_samples"]
+                self.server_has_samples = (self.last_samples is not None
+                                           and len(self.last_samples) > 1)
             self.last_feature_ms = result.get("feature_ms")
             feats = result.get("features") or {}
             self.last_features = {k: np.asarray(v, dtype=np.float32)

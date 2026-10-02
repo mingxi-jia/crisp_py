@@ -6,5 +6,7 @@ from control.teleop.spacemouse_policy import (
     SpacemousePolicy,
 )
 from control.teleop.driver import TeleopDriver, TeleopStep
+from control.teleop.tuning import load_teleop_config, resolve_spacemouse_config
 
-__all__ = ["Action", "SpacemouseConfig", "SpacemousePolicy", "TeleopDriver", "TeleopStep"]
+__all__ = ["Action", "SpacemouseConfig", "SpacemousePolicy", "TeleopDriver", "TeleopStep",
+           "load_teleop_config", "resolve_spacemouse_config"]

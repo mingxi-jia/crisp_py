@@ -40,26 +40,9 @@ import argparse
 import time
 
 from control.robot_client import RobotClient
-from control.teleop import SpacemouseConfig, SpacemousePolicy
-from control.ik import DifferentialIK, MAX_LEAD_M, MAX_LEAD_RAD
+from control.teleop import SpacemousePolicy, resolve_spacemouse_config
+from control.ik import DifferentialIK
 from control.teleop.driver import TeleopDriver
-
-
-# Joint space asks more of the arm than Cartesian space does for the same
-# gain. DifferentialIK converts a Cartesian step into joint motion and clips
-# it at max_step_rad (0.05 rad/tick = 2.5 rad/s at 50 Hz), which is sized to
-# the FR3's own joint velocity limit of 2.62 rad/s on j1-j4. Measured over 400
-# random configurations, the fraction of them where the required step exceeds
-# that clip is:
-#
-#     action_size 0.003 -> 0%     0.010 -> 7%
-#     action_size 0.008 -> 1%     0.015 -> 30%
-#
-# A clipped step is motion the arm is physically unable to make, so the
-# command runs ahead and the arm drags. Cartesian space has no such clip --
-# the impedance controller just tracks a pose -- which is why the same gain
-# feels direct there and draggy here.
-JOINT_ACTION_SIZE = 0.008
 
 
 def parse_args():
@@ -72,16 +55,14 @@ def parse_args():
     p.add_argument("--n-steps", type=int, default=None,
                    help="stop after this many steps (default: run until Ctrl+C)")
     p.add_argument("--action-size", type=float, default=None,
-                   help="per-step translation gain [m] (default: 0.015 in "
-                        "cartesian space, 0.008 in joint space, where "
-                        "DifferentialIK's max_step_rad clips anything "
-                        "faster)")
+                   help="per-step translation gain [m] (default: control-space "
+                        "value in config/teleop.yaml)")
     p.add_argument("--rotation-size", type=float, default=None,
                    help="per-step rotation gain, decoupled from "
                         "--action-size (default: follow it). Capped by "
                         "--max-lead-rad, which is a speed ceiling: raising "
                         "this past cap/(d/k) has no effect")
-    p.add_argument("--deadzone", type=float, default=0.1,
+    p.add_argument("--deadzone", type=float, default=None,
                    help="spacemouse deadzone, 0..1")
     p.add_argument("--max-lead", type=float, default=None,
                    help="how far the target may run ahead of the arm [m]; "
@@ -96,11 +77,11 @@ def parse_args():
                    help="maximum joint step [rad] in joint mode only")
     p.add_argument("--damping", type=float, default=0.05,
                    help="DLS damping in joint mode only")
-    p.add_argument("--brake-ticks", type=int, default=1,
+    p.add_argument("--brake-ticks", type=int, default=None,
                    help="idle ticks before the release brake fires. 1 stops "
                         "instantly; 2-3 debounces a jittery deadzone at the "
                         "cost of a little coast")
-    p.add_argument("--no-brake", dest="brake", action="store_false",
+    p.add_argument("--no-brake", dest="brake", action="store_false", default=None,
                    help="do not snap the target onto the arm when the puck is "
                         "released; the arm then coasts out its lead")
     p.add_argument("--test", action="store_true",
@@ -514,35 +495,12 @@ def main():
                          max_step_rad=args.max_step_rad)
           if drive_space == "joint" else None)
 
-    # Two lead clamps run in series in joint mode: this policy's, and the one
-    # inside DifferentialIK. Only the tighter of the pair ever binds, so if
-    # the IK's is tighter it clamps on every push and sets .lagging, which
-    # the loop reports -- a stream of "[IK lagging]" that means nothing
-    # except that the wrong clamp is in charge. Keep the policy's just inside
-    # the IK's so the policy is the one that acts and the IK stays a
-    # backstop. Explicit flags still win.
-    action_size = args.action_size
-    if action_size is None:
-        action_size = JOINT_ACTION_SIZE if drive_space == "joint" else 0.015
-
-    if drive_space == "joint":
-        default_lead = 0.9 * min(MAX_LEAD_M, ik.max_lead_m)
-        default_lead_rad = 0.9 * min(MAX_LEAD_RAD, ik.max_lead_rad)
-    else:
-        default_lead, default_lead_rad = 0.10, 0.50
-    max_lead = default_lead if args.max_lead is None else args.max_lead
-    max_lead_rad = (default_lead_rad if args.max_lead_rad is None
-                    else args.max_lead_rad)
-
-    policy = SpacemousePolicy(SpacemouseConfig(
-        action_size=action_size,
-        deadzone=args.deadzone,
-        max_lead_m=max_lead if max_lead > 0 else None,
-        max_lead_rad=max_lead_rad if max_lead_rad > 0 else None,
-        rotation_size=args.rotation_size,
-        brake_on_release=args.brake,
-        brake_release_ticks=args.brake_ticks,
-    ))
+    policy_config = resolve_spacemouse_config(
+        drive_space, ik=ik, action_size=args.action_size,
+        rotation_size=args.rotation_size, deadzone=args.deadzone,
+        max_lead_m=args.max_lead, max_lead_rad=args.max_lead_rad,
+        brake_on_release=args.brake, brake_release_ticks=args.brake_ticks)
+    policy = SpacemousePolicy(policy_config)
 
     if args.home:
         print("Homing...")
@@ -552,7 +510,7 @@ def main():
     step = 0
 
     print(f"Driving in {drive_space} control space, "
-          f"action_size={action_size:.3f}.")
+          f"action_size={policy_config.action_size:.3f}.")
     print(f"Teleoperating at {args.rate:.0f} Hz. 'r' to re-home, Ctrl+C to quit.")
     with TeleopDriver(robot, policy, drive_space, ik=ik) as driver:
 

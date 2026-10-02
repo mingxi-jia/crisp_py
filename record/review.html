@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trajectory review</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --surface: #fcfcfb; --page: #f9f9f7; --ink: #0b0b0b; --secondary: #52514e;
+      --muted: #898781; --grid: #e1e0d9; --baseline: #c3c2b7;
+      --slot1: #2a78d6; --slot2: #eb6834; --slot3: #1baf7a; --slot4: #eda100;
+      --slot5: #e87ba4; --slot6: #008300; --slot7: #4a3aa7; --good: #0ca30c;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        --surface: #1a1a19; --page: #0d0d0d; --ink: #ffffff; --secondary: #c3c2b7;
+        --muted: #898781; --grid: #2c2c2a; --baseline: #383835;
+        --slot1: #3987e5; --slot2: #d95926; --slot3: #199e70; --slot4: #c98500;
+        --slot5: #d55181; --slot6: #008300; --slot7: #9085e9;
+      }
+    }
+    :root[data-theme="dark"] {
+      --surface: #1a1a19; --page: #0d0d0d; --ink: #ffffff; --secondary: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --baseline: #383835;
+      --slot1: #3987e5; --slot2: #d95926; --slot3: #199e70; --slot4: #c98500;
+      --slot5: #d55181; --slot6: #008300; --slot7: #9085e9;
+    }
+    :root[data-theme="light"] {
+      --surface: #fcfcfb; --page: #f9f9f7; --ink: #0b0b0b; --secondary: #52514e;
+      --muted: #898781; --grid: #e1e0d9; --baseline: #c3c2b7;
+      --slot1: #2a78d6; --slot2: #eb6834; --slot3: #1baf7a; --slot4: #eda100;
+      --slot5: #e87ba4; --slot6: #008300; --slot7: #4a3aa7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--ink); font: 14px system-ui, -apple-system, "Segoe UI", sans-serif; }
+    button, input, select { font: inherit; color: inherit; }
+    button, select, input { border: 1px solid var(--baseline); background: var(--surface); border-radius: 4px; padding: 5px 7px; }
+    button { cursor: pointer; } button:hover, .episode.selected { outline: 2px solid var(--slot1); outline-offset: -2px; }
+    .app { display: grid; grid-template-columns: 285px minmax(0, 1fr); min-height: 100vh; }
+    aside { border-right: 1px solid var(--baseline); padding: 12px; overflow: auto; max-height: 100vh; position: sticky; top: 0; }
+    aside h1 { margin: 0 0 10px; font-size: 18px; } #filter { width: 100%; margin-bottom: 9px; }
+    .episode { display: grid; grid-template-columns: 72px 1fr; gap: 8px; width: 100%; padding: 7px; margin: 0 0 8px; text-align: left; }
+    .episode img { width: 72px; height: 54px; object-fit: cover; background: var(--grid); border-radius: 2px; }
+    .episode strong, .episode small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .episode small { color: var(--secondary); margin-top: 2px; }.bad { color: #b42020; font-weight: 700; }
+    main { min-width: 0; padding: 14px; }.topbar { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    #episodeTitle { margin: 0 auto 0 0; font-size: 18px; }.mono, .readout, .axis { font-variant-numeric: tabular-nums; }
+    #videos { display: flex; gap: 10px; overflow-x: auto; }.camera { min-width: 280px; flex: 1; }.camera label { display: block; color: var(--secondary); margin-bottom: 3px; }
+    video { display: block; width: 100%; max-height: 390px; background: #000; }.timeline { margin: 10px 0 5px; display: flex; gap: 9px; align-items: center; }
+    #scrubber { width: 100%; }.bands { margin-bottom: 15px; }.band { display: grid; grid-template-columns: 112px 1fr; gap: 7px; align-items: center; margin-top: 3px; color: var(--secondary); font-size: 12px; }
+    .bandPixels { display: flex; height: 11px; overflow: hidden; background: var(--surface); border: 1px solid var(--baseline); }.bandPixels i { min-width: 1px; flex: 1; }.bandPixels i.on { background: var(--good); }.bandPixels i.stale { background: #b42020; }
+    #charts { display: grid; gap: 11px; }.chart { position: relative; background: var(--surface); border: 1px solid var(--baseline); padding: 8px; overflow: hidden; }
+    .chart header { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; }.chart h2 { margin: 0; font-size: 14px; }.legend { display: flex; gap: 5px; flex-wrap: wrap; }.legend button { font-size: 11px; padding: 2px 5px; }.legend button.off { opacity: .45; text-decoration: line-through; }
+    svg { display: block; width: 100%; height: 185px; touch-action: none; }.grid { stroke: var(--grid); stroke-width: 1; }.baseline { stroke: var(--baseline); stroke-width: 1; }.axis { fill: var(--muted); font-size: 10px; }.line { fill: none; stroke-width: 2; }.crosshair { stroke: var(--ink); stroke-width: 1; opacity: .8; }
+    .direct { fill: var(--ink); font-size: 10px; }.tooltip { position: absolute; z-index: 2; pointer-events: none; background: var(--surface); border: 1px solid var(--baseline); color: var(--ink); padding: 4px 6px; font-size: 11px; line-height: 1.35; white-space: nowrap; }
+    .collapsed svg, .collapsed .legend { display: none; }.collapsed { min-height: 34px; }.collapse { margin-left: auto; }
+    .readout { width: 100%; border-collapse: collapse; margin-top: 15px; background: var(--surface); }.readout caption { text-align: left; font-weight: 700; padding: 7px 0; }.readout th, .readout td { padding: 4px 7px; border: 1px solid var(--baseline); text-align: left; vertical-align: top; }.readout th { color: var(--secondary); width: 35%; }
+    .hint, #empty { color: var(--secondary); }.hidden { display: none; } @media (max-width: 760px) { .app { grid-template-columns: 1fr; } aside { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--baseline); }.episodes { display: flex; overflow: auto; }.episode { min-width: 230px; } main { padding: 10px; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside><h1>Trajectory review</h1><input id="filter" type="search" placeholder="Filter episodes"><div id="episodes" class="episodes"></div></aside>
+    <main>
+      <div class="topbar"><h1 id="episodeTitle">Choose an episode</h1><button id="theme" type="button">Theme</button><button id="bad" type="button">Mark bad</button><label>Speed <select id="speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></label></div>
+      <p id="empty">Choose an episode in the left rail. Shortcuts: Space play/pause, ←/→ one frame, Shift+←/→ ten frames, B toggles bad.</p>
+      <section id="review" class="hidden">
+        <div id="videos"></div>
+        <div class="timeline"><span class="mono" id="time">frame 0 · 0.000 s</span><input id="scrubber" type="range" min="0" value="0"></div>
+        <div id="bands" class="bands"></div><div id="charts"></div>
+        <table class="readout"><caption>Values at cursor frame</caption><tbody id="readout"></tbody></table>
+      </section>
+    </main>
+  </div>
+  <script>
+  (() => {
+    const root = document.documentElement, qs = s => document.querySelector(s), el = (tag, attrs = {}, text = "") => { const n = document.createElement(tag); Object.assign(n, attrs); n.textContent = text; return n; };
+    // This namespace identifies SVG elements; it is not fetched by the page.
+    const svgNS = "http:" + "//www.w3.org/2000/svg";
+    let index = [], current = null, cursor = 0, videos = [], hidden = new Set(), dragging = false, raf = 0, syncGeneration = 0;
+    const chartSpecs = [
+      ["Joint positions", "rad", "joint_position", ["q1","q2","q3","q4","q5","q6","q7"]],
+      ["End-effector position", "m", "fingertip_position", ["x","y","z"]],
+      ["Gripper", "value", null, ["measured", "commanded"], [v => v.gripper_value, v => v.action_gripper]],
+      ["FT force", "N", "ft_wrench", ["fx","fy","fz"]],
+      ["FT torque", "N·m", "ft_wrench", ["tx","ty","tz"], null, 3],
+      ["Spacemouse translation command", "m", "action_delta", ["dx","dy","dz"], null, 0, true],
+      ["Spacemouse rotation command", "rad", "action_delta", ["droll","dpitch","dyaw"], null, 3, true]
+    ];
+    const color = slot => getComputedStyle(root).getPropertyValue(`--slot${slot + 1}`).trim();
+    const valuesFor = (spec, slot) => {
+      if (spec[4]) return spec[4][slot](current);
+      return (current[spec[2]] || []).map(row => Array.isArray(row) ? row[slot + (spec[5] || 0)] : null);
+    };
+    const fmt = v => v == null || !Number.isFinite(v) ? "—" : Math.abs(v) >= 1000 || (Math.abs(v) && Math.abs(v) < .001) ? v.toExponential(3) : Number(v).toFixed(4);
+    function makeSvg(tag, attrs, text) { const n = document.createElementNS(svgNS, tag); Object.entries(attrs || {}).forEach(([k,v]) => n.setAttribute(k, v)); if (text !== undefined) n.textContent = text; return n; }
+    function episodeCard(item) {
+      const b = el("button", {className: "episode" + (item.id === (current && current.id) ? " selected" : "")});
+      b.append(el("img", {src: `/api/episode/${encodeURIComponent(item.id)}/thumbnail.jpg`, alt: ""}));
+      const info = el("span"); info.append(el("strong", {}, item.task || item.id)); info.append(el("small", {className:"mono"}, `${item.duration_s.toFixed(2)} s · ${item.n_frames} frames`)); info.append(el("small", {}, `${item.control_space || ""} ${item.bad ? " · BAD" : ""}`)); if (item.bad) info.lastChild.classList.add("bad"); b.append(info); b.onclick = () => loadEpisode(item.id); return b;
+    }
+    function renderIndex() { const term = qs("#filter").value.toLowerCase(); const host = qs("#episodes"); host.replaceChildren(...index.filter(e => `${e.id} ${e.task} ${e.notes}`.toLowerCase().includes(term)).map(episodeCard)); }
+    function fps() { return Number(current.meta.record_fps) || 30; }
+    function activeVideos() { return videos.filter(v => v.readyState > 0); }
+    function setCursor(frame, seek = false) {
+      if (!current) return; cursor = Math.max(0, Math.min(current.meta.n_frames - 1, Math.round(frame))); qs("#scrubber").value = cursor;
+      qs("#time").textContent = `frame ${cursor} · ${fmt((current.t_rel || [])[cursor])} s`;
+      if (seek) activeVideos().forEach(v => { if (Math.abs(v.currentTime * fps() - cursor) > .2) v.currentTime = cursor / fps(); });
+      renderBands(); renderCharts(); renderReadout();
+    }
+    function masterTick() {
+      if (!videos.length || !current) return; const master = videos[0];
+      setCursor(Math.round(master.currentTime * fps()));
+      videos.slice(1).forEach(v => { if (Math.abs(v.currentTime * fps() - cursor) > 1) v.currentTime = master.currentTime; });
+    }
+    function bindMaster(master) {
+      const generation = syncGeneration;
+      const tick = () => { if (generation !== syncGeneration) return; masterTick(); if (master.requestVideoFrameCallback) master.requestVideoFrameCallback(tick); };
+      if (master.requestVideoFrameCallback) master.requestVideoFrameCallback(tick);
+      else { master.addEventListener("timeupdate", masterTick); const loop = () => { masterTick(); raf = requestAnimationFrame(loop); }; raf = requestAnimationFrame(loop); }
+    }
+    function renderVideos() {
+      cancelAnimationFrame(raf); syncGeneration++; const host = qs("#videos"); host.replaceChildren(); videos = [];
+      const cameras = current.meta.cameras || [];
+      cameras.forEach((camera, i) => { const wrap = el("div", {className:"camera"}); wrap.append(el("label", {}, camera.name)); const v = el("video", {controls: i === 0, preload:"metadata", muted:true}); v.src = `/video/${encodeURIComponent(current.id)}/${encodeURIComponent(camera.name)}.mp4`; v.playbackRate = Number(qs("#speed").value); v.addEventListener("loadedmetadata", () => { if (i) v.currentTime = videos[0].currentTime; }); if (i === 0) { v.addEventListener("play", () => videos.slice(1).forEach(other => other.play().catch(() => {}))); v.addEventListener("pause", () => videos.slice(1).forEach(other => other.pause())); } wrap.append(v); host.append(wrap); videos.push(v); });
+      if (videos[0]) bindMaster(videos[0]);
+    }
+    function renderBands() {
+      const host = qs("#bands"); host.replaceChildren(); if (!current) return;
+      const add = (label, values, cls) => { const row = el("div", {className:"band"}); row.append(el("span", {}, label)); const pixels = el("div", {className:"bandPixels", title: label}); values.forEach(v => pixels.append(el("i", {className: v ? `on ${cls}` : ""}))); row.append(pixels); host.append(row); };
+      add("Grasp (1 = closed)", current.action_grasp || [], "");
+      (current.meta.cameras || []).forEach(c => add(`${c.name} stale`, current[`${c.name}_stale`] || [], "stale"));
+    }
+    function chartNode(spec, specIndex) {
+      const wrap = el("section", {className: "chart" + (spec[6] ? " collapsed" : "")}); const header = el("header"); header.append(el("h2", {}, `${spec[0]} [${spec[1]}]`)); const legend = el("div", {className:"legend"});
+      spec[3].forEach((name, slot) => { const key = `${specIndex}:${slot}`, b = el("button", {type:"button", className:hidden.has(key) ? "off" : ""}, name); b.style.borderLeft = `4px solid ${color(slot)}`; b.onclick = () => { hidden.has(key) ? hidden.delete(key) : hidden.add(key); renderCharts(); }; legend.append(b); }); header.append(legend);
+      if (spec[6]) { const collapse = el("button", {type:"button", className:"collapse"}, "Expand"); collapse.onclick = () => { wrap.classList.toggle("collapsed"); collapse.textContent = wrap.classList.contains("collapsed") ? "Expand" : "Collapse"; }; header.append(collapse); } const svg = document.createElementNS(svgNS, "svg"); svg.setAttribute("aria-label", spec[0]); wrap.append(header, svg, el("div", {className:"tooltip hidden"})); return wrap;
+    }
+    function renderCharts() {
+      const host = qs("#charts"); if (!current) return; if (!host.children.length) host.replaceChildren(...chartSpecs.map(chartNode));
+      [...host.children].forEach((wrap, specIndex) => drawChart(wrap, chartSpecs[specIndex], specIndex));
+    }
+    function drawChart(wrap, spec, specIndex) {
+      const svg = wrap.querySelector("svg"), tooltip = wrap.querySelector(".tooltip"); if (wrap.classList.contains("collapsed")) return;
+      const rect = svg.getBoundingClientRect(), W = Math.max(260, Math.round(rect.width)), H = 185, L = 51, R = 12, T = 10, B = 25, n = current.meta.n_frames;
+      const series = spec[3].map((name, slot) => ({name, slot, values:valuesFor(spec, slot), hidden:hidden.has(`${specIndex}:${slot}`)})); const all = series.filter(s => !s.hidden).flatMap(s => s.values).filter(v => Number.isFinite(v));
+      let lo = all.length ? Math.min(...all) : 0, hi = all.length ? Math.max(...all) : 1; if (lo === hi) { lo -= .5; hi += .5; } const pad = (hi-lo)*.06; lo -= pad; hi += pad;
+      const x = i => L + (n < 2 ? 0 : i * (W-L-R)/(n-1)), y = v => T + (hi-v)*(H-T-B)/(hi-lo); svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.replaceChildren();
+      for (let k=0;k<5;k++) { const yy=T+k*(H-T-B)/4, value=hi-k*(hi-lo)/4; svg.append(makeSvg("line", {x1:L,y1:yy,x2:W-R,y2:yy,class:"grid"}), makeSvg("text", {x:L-4,y:yy+3,"text-anchor":"end",class:"axis"}, fmt(value))); }
+      svg.append(makeSvg("line", {x1:L,y1:H-B,x2:W-R,y2:H-B,class:"baseline"})); [0,.5,1].forEach(f => svg.append(makeSvg("text", {x:L+f*(W-L-R),y:H-7,"text-anchor":f===0?"start":f===1?"end":"middle",class:"axis"}, fmt((current.t_rel || [0])[Math.round(f*(n-1))]))));
+      series.forEach(s => { if (s.hidden) return; let d="", started=false, last=-1; s.values.forEach((v,i) => { if (!Number.isFinite(v)) { started=false; return; } d += `${started?"L":"M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`; started=true; last=i; }); svg.append(makeSvg("path", {d,class:"line",stroke:color(s.slot)})); if (series.length <= 4 && last >= 0) svg.append(makeSvg("text", {x:Math.min(W-R-2,x(last)+4),y:y(s.values[last])-3,class:"direct"}, s.name)); });
+      const cx=x(cursor); svg.append(makeSvg("line", {x1:cx,y1:T,x2:cx,y2:H-B,class:"crosshair"})); const lines=series.filter(s=>!s.hidden).map(s=>`${s.name}: ${fmt(s.values[cursor])}`); tooltip.textContent=lines.join(" · "); tooltip.classList.toggle("hidden", !lines.length); tooltip.style.left=`${Math.min(rect.width-180, Math.max(55, cx+6))}px`; tooltip.style.top="34px";
+      const seekAt = event => { const r=svg.getBoundingClientRect(); setCursor((event.clientX-r.left-L)/(r.width-L-R)*(n-1), true); }; svg.onpointerdown=e=>{dragging=true; svg.setPointerCapture(e.pointerId); seekAt(e);}; svg.onpointermove=e=>{if(dragging)seekAt(e);}; svg.onpointerup=()=>{dragging=false;};
+    }
+    function renderReadout() { const body=qs("#readout"); body.replaceChildren(); if (!current) return; Object.keys(current).filter(k => !["id","meta"].includes(k)).forEach(key => { const value=current[key][cursor]; const printable=Array.isArray(value) ? `[${value.map(fmt).join(", ")}]` : typeof value === "boolean" ? (value ? "true" : "false") : fmt(value); const row=el("tr"); row.append(el("th", {}, key), el("td", {}, printable)); body.append(row); }); }
+    async function loadEpisode(id) { const response=await fetch(`/api/episode/${encodeURIComponent(id)}`); if (!response.ok) return; current=await response.json(); cursor=0; hidden.clear(); qs("#empty").classList.add("hidden"); qs("#review").classList.remove("hidden"); qs("#episodeTitle").textContent=current.meta.task || current.id; qs("#bad").textContent=current.meta.bad ? "Clear bad flag" : "Mark bad"; qs("#scrubber").max=Math.max(0,current.meta.n_frames-1); qs("#charts").replaceChildren(); renderVideos(); setCursor(0,true); renderIndex(); }
+    async function toggleBad() { if (!current) return; const bad=!current.meta.bad, notes=window.prompt("Review notes", current.meta.operator_notes || ""); if (notes === null) return; const response=await fetch(`/api/episode/${encodeURIComponent(current.id)}/flag`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({bad,notes})}); if (response.ok) { current.meta.bad=bad; current.meta.operator_notes=notes; qs("#bad").textContent=bad?"Clear bad flag":"Mark bad"; const item=index.find(e=>e.id===current.id); if(item){item.bad=bad;item.notes=notes;} renderIndex(); } }
+    qs("#filter").oninput=renderIndex; qs("#scrubber").oninput=e=>setCursor(e.target.value,true); qs("#speed").onchange=e=>videos.forEach(v=>v.playbackRate=Number(e.target.value)); qs("#bad").onclick=toggleBad;
+    qs("#theme").onclick=()=>{ const dark=root.dataset.theme !== "dark"; root.dataset.theme=dark?"dark":"light"; renderCharts(); };
+    document.addEventListener("keydown", e => { if (!current || /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return; if (e.code === "Space") { e.preventDefault(); videos[0] && (videos[0].paused ? videos[0].play() : videos[0].pause()); } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); setCursor(cursor+(e.key === "ArrowRight" ? 1 : -1)*(e.shiftKey?10:1),true); } else if (e.key.toLowerCase() === "b") toggleBad(); });
+    window.addEventListener("resize", () => { if (current) renderCharts(); });
+    fetch("/api/episodes").then(r=>r.json()).then(data=>{index=data;renderIndex();}).catch(()=>{qs("#empty").textContent="Could not load the dataset index.";});
+  })();
+  </script>
+</body>
+</html>

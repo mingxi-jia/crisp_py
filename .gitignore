@@ -33,3 +33,6 @@ third_party/*
 
 # uv creates this if you run `uv run` from the repo root by mistake
 .venv
+
+# hand-eye calibration sessions (images + poses), written by scripts/calibrate_handeye.py
+calibration/

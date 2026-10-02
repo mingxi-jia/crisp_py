@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""openpi policy server that also returns SigLIP vision features.
+"""openpi policy server with the two extras the π0.5 panel needs.
 
 openpi's own scripts/serve_policy.py returns only actions: Policy.infer gives
 {state, actions, policy_timing} and DroidOutputs slices that to 8 dims. The
-π0.5 panel needs the vision tokens too, so this wraps the real policy in a
-BasePolicy decorator and hands it to openpi's own WebsocketPolicyServer --
-which accepts any BasePolicy. third_party/openpi therefore stays a pristine
-clone; nothing here is a fork.
+panel wants two more things -- the SigLIP vision tokens, and several sampled
+plans for one observation -- so this wraps the real policy in a BasePolicy
+decorator and hands it to openpi's own WebsocketPolicyServer, which accepts
+any BasePolicy. third_party/openpi therefore stays a pristine clone; nothing
+here is a fork.
+
+The two extras are independent. --no-features turns off the vision tokens and
+nothing else; --max-samples 1 turns off sampling and nothing else.
 
 The features come from the same forward the action came from: the same
 weights, the same DroidInputs transform, the same normalised images. See
@@ -60,23 +64,41 @@ def build_arg_parser():
     p.add_argument("--no-feature-jit", action="store_true",
                    help="run the vision tower eagerly (slow; for debugging)")
     p.add_argument("--no-features", action="store_true",
-                   help="serve actions only, exactly like openpi's serve_policy.py")
+                   help="skip the vision tokens. Sampling is unaffected; use "
+                        "--max-samples 1 to turn that off instead")
     p.add_argument("--feature-dtype", default="float16", choices=["float16", "float32"],
                    help="float16 halves the wire size; the panel reduces to "
                         "64 PCA components anyway")
+    p.add_argument("--max-samples", type=int, default=8,
+                   help="ceiling on the per-request n_samples. pi0.5 is a flow "
+                        "model sampled from noise, so repeated inference on one "
+                        "observation gives different plans; the panel draws "
+                        "them to show where the policy is unsure. Batched, so "
+                        "N plans cost well under N inferences -- but they are "
+                        "still N times the work, hence a cap")
     return p
 
 
-class FeatureExposingPolicy:
-    """Wraps an openpi Policy, adding vision features to each inference.
+class PanelPolicy:
+    """Wraps an openpi Policy, adding what the panel needs to each inference.
 
-    Implements the BasePolicy surface WebsocketPolicyServer uses (infer,
-    reset), delegating everything else to the wrapped policy.
+    Two independent extras: vision features, and several sampled plans per
+    observation. Implements the BasePolicy surface WebsocketPolicyServer uses
+    (infer, reset), delegating everything else to the wrapped policy.
+
+    Always wrap, even with both extras off. The wrapper is also what
+    advertises them in the server metadata, so a client can tell "this server
+    cannot sample" from "this server chose not to this time"; bypassing it
+    makes the server indistinguishable from openpi's stock one.
     """
 
     def __init__(self, policy, feature_dtype: str = "float16",
-                 every: int = 1, jit: bool = True):
+                 every: int = 1, jit: bool = True, max_samples: int = 8,
+                 features: bool = True):
         self._policy = policy
+        self._max_samples = max(1, int(max_samples))
+        self._sample_warned = False
+        self._features = bool(features)
         self._dtype = np.float16 if feature_dtype == "float16" else np.float32
         self._warned = False
         # The vision tower is a 400M-parameter SigLIP. Run eagerly it costs
@@ -94,8 +116,10 @@ class FeatureExposingPolicy:
     @property
     def metadata(self) -> dict:
         meta = dict(getattr(self._policy, "metadata", {}) or {})
-        meta["features"] = True
+        meta["features"] = self._features
         meta["feature_dtype"] = np.dtype(self._dtype).name
+        meta["samples"] = self._max_samples > 1
+        meta["max_samples"] = self._max_samples
         return meta
 
     def reset(self):
@@ -106,12 +130,28 @@ class FeatureExposingPolicy:
     def infer(self, obs: dict) -> dict:
         import time
 
-        result = self._policy.infer(obs)
+        # A flow model samples its plan from noise, so the same observation
+        # gives a different chunk every time. One request can ask for several
+        # at once; the spread between them is the policy's own uncertainty,
+        # which is otherwise invisible.
+        n = max(1, min(int(obs.get("n_samples", 1) or 1), self._max_samples))
+        if n > 1:
+            try:
+                result = self._infer_samples(obs, n)
+            except Exception:
+                # Never let a visualisation feature stop the robot: fall back
+                # to the ordinary single-sample path.
+                if not self._sample_warned:
+                    logging.exception("batched sampling failed; serving one sample")
+                    self._sample_warned = True
+                result = self._policy.infer(obs)
+        else:
+            result = self._policy.infer(obs)
         self._calls += 1
 
         # Honour a per-request opt-out so a rollout without the panel pays
         # nothing, and skip all but every Nth call otherwise.
-        want = bool(obs.get("want_features", True))
+        want = self._features and bool(obs.get("want_features", True))
         due = (self._calls % self._every) == 0
         if not (want and due):
             result["features"] = self._last_features
@@ -134,6 +174,56 @@ class FeatureExposingPolicy:
             result["features"] = {}
             result["feature_error"] = repr(e)
         return result
+
+    # -- sampling ---------------------------------------------------------
+    def _infer_samples(self, obs: dict, n: int) -> dict:
+        """N plans for one observation, in a single batched forward pass.
+
+        Goes through the policy's own transforms and its own jitted
+        sample_actions, exactly as Policy.infer does -- the only difference is
+        that the observation is repeated N times, so sample_actions draws N
+        independent noise vectors (pi0.py:231) and integrates N trajectories
+        together. Sequential calls would give the same answer at several times
+        the latency.
+
+        The first returned sample is handed back as `actions`, so the chunk
+        being executed is one of the ones drawn rather than an N+1th that
+        nothing shows.
+        """
+        import time
+
+        import jax
+        import jax.numpy as jnp
+        import openpi.models.model as _model
+
+        policy = self._policy
+        inputs = policy._input_transform(jax.tree.map(lambda x: x, obs))  # noqa: SLF001
+        inputs = jax.tree.map(
+            lambda x: jnp.repeat(jnp.asarray(x)[np.newaxis, ...], n, axis=0), inputs)
+        policy._rng, sample_rng = jax.random.split(policy._rng)           # noqa: SLF001
+
+        observation = _model.Observation.from_dict(inputs)
+        start = time.monotonic()
+        actions = policy._sample_actions(                                 # noqa: SLF001
+            sample_rng, observation, **policy._sample_kwargs)             # noqa: SLF001
+        model_ms = (time.monotonic() - start) * 1000.0
+
+        # The output transforms (unnormalise, then keep 8 dims) index the last
+        # axis only, so a leading sample axis passes through untouched.
+        out = policy._output_transform({                                  # noqa: SLF001
+            "state": np.asarray(inputs["state"]),
+            "actions": np.asarray(actions),
+        })
+        samples = np.asarray(out["actions"])
+        return {
+            "state": np.asarray(inputs["state"])[0],
+            "actions": samples[0],
+            # float16: 8 samples x 15 steps x 8 dims is 2 KB on the wire, and
+            # these are only ever drawn.
+            "samples": samples.astype(np.float16),
+            "n_samples": int(samples.shape[0]),
+            "policy_timing": {"infer_ms": model_ms},
+        }
 
     # -- features ---------------------------------------------------------
     def _vision_tokens(self, obs: dict) -> dict:
@@ -186,21 +276,26 @@ class FeatureExposingPolicy:
             return eager
 
 
-def warm_up(served, rounds: int = 2) -> None:
+def warm_up(served, rounds: int = 2, n_samples: int = 1) -> None:
     """Run dummy inferences so JAX compiles before the robot is live.
 
-    Both jitted paths -- openpi's sample_actions and the vision tower -- pay
-    their compilation on first call. Without this the cost lands on the first
-    action chunk of a rollout, with the arm already running.
+    Every jitted path -- openpi's sample_actions, the vision tower, and the
+    batched sampler, which compiles again per batch size -- pays its
+    compilation on first call. Without this the cost lands on the first action
+    chunk of a rollout, with the arm already running.
     """
     import time
 
     from openpi.policies import droid_policy
 
-    for i in range(rounds):
+    # Each distinct batch size is a separate compilation, so warm the batched
+    # sampler at the size the panel will actually ask for.
+    sizes = [1] * rounds + ([n_samples] * 2 if n_samples > 1 else [])
+    for i, n in enumerate(sizes):
         example = droid_policy.make_droid_example()
         example["prompt"] = "warm up"
         example["want_features"] = True
+        example["n_samples"] = n
         t = time.perf_counter()
         try:
             served.infer(example)
@@ -208,8 +303,9 @@ def warm_up(served, rounds: int = 2) -> None:
             logging.warning("warm-up inference %d failed: %s", i + 1, e)
             return
         dt = (time.perf_counter() - t) * 1000
-        logging.info("warm-up %d/%d: %.0f ms%s", i + 1, rounds, dt,
-                     "  (compiling)" if i == 0 else "  (compiled)")
+        logging.info("warm-up %d/%d: %.0f ms, %d sample(s)%s",
+                     i + 1, len(sizes), dt, n,
+                     "  (compiling)" if i in (0, rounds) else "  (compiled)")
 
 
 def main():
@@ -232,17 +328,22 @@ def main():
     policy = _policy_config.create_trained_policy(
         train_config, args.dir, default_prompt=args.default_prompt)
 
-    served = policy if args.no_features else FeatureExposingPolicy(
+    # Wrap unconditionally: --no-features switches the feature path off inside
+    # the wrapper rather than removing it, so sampling -- and the metadata
+    # that advertises both -- survives.
+    served = PanelPolicy(
         policy, feature_dtype=args.feature_dtype,
-        every=args.feature_every, jit=not args.no_feature_jit)
+        every=args.feature_every, jit=not args.no_feature_jit,
+        max_samples=args.max_samples, features=not args.no_features)
 
     if not args.no_warmup:
         logging.info("warming up (JAX compiles now, not on your first chunk)...")
-        warm_up(served, rounds=args.warmup_rounds)
+        warm_up(served, rounds=args.warmup_rounds,
+                n_samples=args.max_samples)
 
     metadata = getattr(served, "metadata", {}) or {}
-    logging.info("serving on %s:%d  features=%s",
-                 args.host, args.port, not args.no_features)
+    logging.info("serving on %s:%d  features=%s  max_samples=%d",
+                 args.host, args.port, not args.no_features, args.max_samples)
     websocket_policy_server.WebsocketPolicyServer(
         policy=served, host=args.host, port=args.port, metadata=metadata,
     ).serve_forever()

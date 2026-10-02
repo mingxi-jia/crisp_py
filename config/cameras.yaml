@@ -4,6 +4,20 @@
 # identity and stream settings live -- the ROS launch file is only used by the
 # legacy 'ros' backend.
 #
+# Names are roles, not hardware slots: `agentview` is whichever camera watches
+# the workspace and `inhand` is whichever one rides the gripper, so swapping a
+# device is a serial change here and nothing else. They are the keys every
+# observation is returned under, and what --external-camera / --wrist-camera
+# take. (The legacy 'ros' backend still publishes /cam1 and /cam4 topics; its
+# names come from control/launch_cameras.launch.py, not from this file.)
+#
+# calibration: which entry in config/camera_info.yaml describes this camera's
+# intrinsics and its pose in the robot base frame. It is a separate key
+# because that file is named after whichever rig was calibrated, and those
+# names drift from these roles -- the camera now called `agentview` was
+# calibrated as `cam3`. Used by the pi0.5 panel to project the predicted
+# trajectory onto the image; a camera without one simply gets no overlay.
+#
 # Find serials with:  python -m control.observer --devices
 #
 # exposure_us: motion blur is exposure time, not frame rate. A gripper moving
@@ -18,11 +32,12 @@
 # RGB images plus joint positions, and a depth stream costs ~40% of a camera's
 # USB bandwidth plus a depth-to-colour alignment pass.
 
-inhand_camera: cam4
+inhand_camera: inhand
 
 cameras:
-  cam1:                        # side / exterior view (static, blurs least)
+  agentview:                   # workspace view (static, blurs least)
     serial: "239222303046"
+    calibration: cam3          # entry in config/camera_info.yaml
     width: 848
     height: 480
     fps: 15
@@ -30,8 +45,13 @@ cameras:
     exposure_us: 20000
     gain: 64
 
-  cam4:                        # in-hand (D405) -- moves with the gripper, so
+  inhand:                      # in-hand (D405) -- moves with the gripper, so
     serial: "218722271574"      # it is the one that actually blurs
+    calibration: cam4          # entry in config/camera_info.yaml. Needs a
+                               # `frame:` line: this camera rides the gripper,
+                               # so its pose is fixed relative to that link,
+                               # not to the robot base. Until that entry
+                               # exists the panel simply skips this camera.
     width: 480
     height: 270
     fps: 15

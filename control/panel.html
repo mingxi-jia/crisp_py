@@ -52,6 +52,13 @@
   .cams { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); }
   .cam { position: relative; background: #000; aspect-ratio: 16 / 9; }
   .cam img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cam canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+                pointer-events: none; }
+  .cam .nofit { position: absolute; right: 8px; bottom: 8px; font: 10px var(--mono);
+                color: var(--warn); background: rgba(0,0,0,.6); padding: 2px 6px;
+                border-radius: 4px; display: none; }
+  label.toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+                 color: var(--muted); cursor: pointer; }
   .cam .tag {
     position: absolute; left: 8px; top: 8px; font: 11px var(--mono);
     background: rgba(0,0,0,.66); padding: 2px 7px; border-radius: 4px; color: var(--accent);
@@ -100,6 +107,10 @@
   <span class="pill" id="pause-pill" hidden><span class="dot" style="background:var(--warn)"></span><span id="pause-text">PAUSED</span></span>
   <span class="spacer"></span>
   <label>feed <input type="range" id="fps" min="1" max="15" value="6"><span id="fps-val" style="font-family:var(--mono)">6</span> fps</label>
+  <label class="toggle"><input type="checkbox" id="ovl" checked> gripper</label>
+  <button id="btn-takeover" title="jog the arm with the spacemouse; a running policy keeps planning but stops moving it">Take over</button>
+  <span class="pill" id="ovl-pill" title="forward kinematics against the pose the driver reports">FK —</span>
+  <span class="pill" id="takeover-pill" style="display:none"></span>
   <button id="btn-open">Open gripper</button>
   <button id="btn-close">Close gripper</button>
   <button id="btn-pause">Pause</button>
@@ -167,10 +178,14 @@ function buildFeeds(names, inhand) {
     const label = id === inhand ? `${id} (in-hand)` : id;
     const wrap = document.createElement("div");
     wrap.className = "cam stale";
-    wrap.innerHTML = `<img alt="${label}"><span class="tag">${label}</span>`
-                   + `<span class="age"></span><span class="off">no frame</span>`;
+    wrap.innerHTML = `<img alt="${label}"><canvas></canvas>`
+                   + `<span class="tag">${label}</span>`
+                   + `<span class="age"></span><span class="off">no frame</span>`
+                   + `<span class="nofit">gripper off screen</span>`;
     $("cams").appendChild(wrap);
     return { id, wrap, img: wrap.querySelector("img"),
+             canvas: wrap.querySelector("canvas"),
+             nofit: wrap.querySelector(".nofit"),
              age: wrap.querySelector(".age"), busy: false };
   });
   // One camera looks silly in a 2-up grid.
@@ -187,11 +202,86 @@ function pollCameras() {
       f.img.src = probe.src;
       f.wrap.classList.remove("stale");
       f.busy = false;
+      drawOverlay(f);
     };
     probe.onerror = () => { f.wrap.classList.add("stale"); f.busy = false; };
     probe.src = `/camera/${f.id}.jpg?q=70&t=${Date.now()}`;
   }
 }
+
+// ---- gripper overlay -----------------------------------------------------
+// Where the fingertip is, projected into each calibrated camera by the server
+// (control/projection.py). Drawn here rather than burned into the JPEG so the
+// feed stays a plain camera image for anything else that reads it.
+const AXIS_COLOURS = ["#ff5252", "#69f0ae", "#40c4ff"];   // x, y, z
+let overlay = null;
+
+// The feeds use object-fit: contain, so the picture is letterboxed inside its
+// box. Drawing in box coordinates would put the cross a few percent off, which
+// on a calibration check is exactly the error being looked for.
+function imageRect(f) {
+  const bw = f.canvas.clientWidth, bh = f.canvas.clientHeight;
+  const nw = f.img.naturalWidth, nh = f.img.naturalHeight;
+  if (!nw || !nh) return { x: 0, y: 0, w: bw, h: bh };
+  const scale = Math.min(bw / nw, bh / nh);
+  const w = nw * scale, h = nh * scale;
+  return { x: (bw - w) / 2, y: (bh - h) / 2, w, h };
+}
+
+function drawOverlay(f) {
+  const cv = f.canvas;
+  const dpr = window.devicePixelRatio || 1;
+  const bw = cv.clientWidth, bh = cv.clientHeight;
+  if (!bw || !bh) return;
+  if (cv.width !== Math.round(bw * dpr) || cv.height !== Math.round(bh * dpr)) {
+    cv.width = Math.round(bw * dpr); cv.height = Math.round(bh * dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, bw, bh);
+  f.nofit.style.display = "none";
+
+  const d = overlay && overlay.cameras && overlay.cameras[f.id];
+  if (!$("ovl").checked || !d || d.error || !d.front) return;
+  if (!d.in_frame) { f.nofit.style.display = "block"; return; }
+
+  const r = imageRect(f);
+  const at = ([u, v]) => [r.x + u * r.w, r.y + v * r.h];
+  const [ox, oy] = at(d.point);
+
+  d.axes.forEach((a, i) => {
+    const [x, y] = at(a);
+    for (const [colour, width] of [["rgba(0,0,0,.6)", 4], [AXIS_COLOURS[i], 2]]) {
+      ctx.strokeStyle = colour; ctx.lineWidth = width; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(x, y); ctx.stroke();
+    }
+  });
+  for (const [colour, width] of [["rgba(0,0,0,.6)", 4], ["#ffffff", 1.8]]) {
+    ctx.strokeStyle = colour; ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(ox - 9, oy); ctx.lineTo(ox + 9, oy);
+    ctx.moveTo(ox, oy - 9); ctx.lineTo(ox, oy + 9);
+    ctx.stroke();
+  }
+}
+
+async function pollOverlay() {
+  if (!$("ovl").checked) { overlay = null; feeds.forEach(drawOverlay); return; }
+  try {
+    const r = await fetch("/overlay");
+    overlay = await r.json();
+    const mm = overlay.fk_residual_mm;
+    $("ovl-pill").textContent = mm == null ? "FK —" : `FK ${mm.toFixed(1)} mm`;
+    $("ovl-pill").style.color = mm != null && mm > 5 ? "var(--warn)" : "var(--muted)";
+    feeds.forEach(drawOverlay);
+  } catch (e) {
+    overlay = null;
+    $("ovl-pill").textContent = "FK —";
+  }
+}
+
+$("ovl").addEventListener("change", () => { pollOverlay(); feeds.forEach(drawOverlay); });
+addEventListener("resize", () => feeds.forEach(drawOverlay));
 
 let camTimer = null;
 function setFps(fps) {
@@ -237,6 +327,59 @@ function decodeNpy(payload) {
 }
 
 let isPaused = null;
+// ---- takeover ------------------------------------------------------------
+// The arm can be handed to the spacemouse without stopping a policy: its
+// commands keep arriving and keep being dropped, so it goes on planning
+// against wherever the human puts the arm.
+let takeover = null;
+
+function renderTakeover(t) {
+  takeover = t || null;
+  const on = !!(t && t.active);
+  const b = $("btn-takeover");
+  b.textContent = on ? "Hand back" : "Take over";
+  b.className = on ? "danger" : "";
+  if (t && t.error) {
+    b.title = t.error;
+  } else {
+    b.title = on
+      ? "return the arm to the policy; it resumes from where you left it"
+      : "jog the arm with the spacemouse; a running policy keeps planning "
+        + "but stops moving it";
+  }
+  const flags = !on ? "" :
+    (t.at_workspace_limit ? " · at the workspace limit" : "")
+    + (t.at_joint_limit ? " · at a joint limit" : "");
+  $("takeover-pill").style.display = on || (t && t.error) ? "inline-flex" : "none";
+  $("takeover-pill").textContent = t && t.error ? `takeover: ${t.error}`
+    : `you have the arm${flags}`;
+  $("takeover-pill").style.color = t && t.error ? "var(--err)" : "var(--warn)";
+}
+
+async function pollTakeover() {
+  // Its own poll rather than a field on /get_state: that is the control
+  // loop's hot path and this is panel furniture. Once a second is plenty --
+  // the button also updates optimistically from its own response.
+  try {
+    renderTakeover(await (await fetch("/takeover")).json());
+  } catch (e) { /* the server is down; pollState already says so */ }
+}
+
+$("btn-takeover").addEventListener("click", async () => {
+  const on = !(takeover && takeover.active);
+  $("btn-takeover").disabled = true;
+  try {
+    const r = await post("/takeover", { on });
+    renderTakeover(r);
+    log(r.error ? `takeover failed: ${r.error}`
+                : (on ? "you have the arm — the policy is still planning"
+                      : "arm handed back to the policy"),
+        r.error ? "err" : "ok");
+  } finally {
+    $("btn-takeover").disabled = false;
+  }
+});
+
 function setPaused(p) {
   if (p === isPaused) return;
   isPaused = p;
@@ -414,10 +557,12 @@ wire("btn-reset", "Reset to home", () => post("/home"),
 
 setFps(+$("fps").value);
 await_first_status();
-async function await_first_status() { await pollCameraStatus(); pollCameras(); }
+async function await_first_status() { await pollCameraStatus(); pollCameras(); pollTakeover(); }
 pollState();
 pollCameraStatus();
 setInterval(pollState, 200);
+setInterval(pollOverlay, 200);
+setInterval(pollTakeover, 1000);
 setInterval(pollCameraStatus, 3000);
 log("panel loaded");
 </script>

@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand-eye calibration</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef;
+    --muted:#8b93a7; --accent:#4fc3f7; --ok:#4CAF50; --warn:#FF9800; --err:#F44336;
+    --mono: ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font:14px/1.5 system-ui,-apple-system,sans-serif}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 18px;
+         background:var(--panel);border-bottom:1px solid var(--line);
+         position:sticky;top:0;z-index:10}
+  h1{font-size:15px;margin:0;font-weight:600}
+  .spacer{flex:1}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);
+        background:#10131a;border:1px solid var(--line);padding:5px 11px;border-radius:999px}
+  .pill b{color:var(--fg);font-weight:600}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--muted)}
+  button{font:inherit;font-size:13px;color:var(--fg);background:#222735;
+         border:1px solid var(--line);border-radius:7px;padding:7px 14px;cursor:pointer}
+  button:hover{background:#2b3143}
+  button.primary{background:#22496b;border-color:#2f6d9e}
+  button.primary:hover{background:#2a5a84}
+  button.danger:hover{background:#5a2530}
+  button[disabled]{opacity:.4;cursor:not-allowed}
+  main{padding:18px;display:grid;gap:18px;grid-template-columns:1fr}
+  @media(min-width:1000px){main{grid-template-columns:minmax(0,1.4fr) minmax(340px,1fr)}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card>h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+           margin:0;padding:11px 14px;border-bottom:1px solid var(--line);font-weight:600;
+           display:flex;gap:10px;align-items:center}
+  .card>h2 .spacer{flex:1}
+  .body{padding:14px}
+  #live{display:block;width:100%;background:#000;border-radius:6px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px;border-top:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse}
+  td{padding:6px 14px;border-bottom:1px solid var(--line)}
+  td:first-child{color:var(--muted);width:52%}
+  td:last-child{font-family:var(--mono);text-align:right}
+  tr:last-child td{border-bottom:none}
+  .note{color:var(--muted);font-size:12px;padding:10px 14px;line-height:1.5}
+  .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));
+         gap:8px;padding:14px}
+  .shot{position:relative;border-radius:5px;overflow:hidden;border:1px solid var(--line)}
+  .shot img{display:block;width:100%}
+  .shot span{position:absolute;left:0;bottom:0;right:0;font:10px var(--mono);
+             padding:2px 5px;background:rgba(0,0,0,.65)}
+  .shot.bad{border-color:var(--err)}
+  .shot.bad span{color:var(--err)}
+  .meter{display:flex;gap:4px;align-items:center;margin-top:6px}
+  .meter i{height:7px;border-radius:3px;background:#2b3143;flex:1}
+  .meter i.on{background:var(--accent)}
+  pre{margin:0;padding:14px;background:#10131a;border-top:1px solid var(--line);
+      font:11px/1.55 var(--mono);color:#cfe3f5;overflow-x:auto;white-space:pre}
+  .verdict{padding:10px 14px;font-size:13px;border-bottom:1px solid var(--line)}
+  .verdict.good{color:var(--ok)} .verdict.bad{color:var(--warn)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Hand-eye calibration</h1>
+  <span class="pill"><span class="dot" id="dot"></span><span id="status">connecting…</span></span>
+  <span class="pill" id="p-samples">0 samples</span>
+  <span class="pill" id="p-target">target —</span>
+  <span class="pill" id="p-still">—</span>
+  <span class="spacer"></span>
+  <span class="pill" id="p-camera">—</span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Live view <span class="spacer"></span><span id="p-points"></span></h2>
+    <div class="body"><img id="live" alt="wrist camera"></div>
+    <div class="controls">
+      <button class="primary" id="b-capture">Capture</button>
+      <button class="primary" id="b-solve">Solve</button>
+      <button id="b-delete">Delete last</button>
+      <button class="danger" id="b-clear">Clear</button>
+      <button id="b-save">Save</button>
+    </div>
+    <div class="note" id="message">—</div>
+  </section>
+
+  <div style="display:grid;gap:18px;align-content:start">
+    <section class="card">
+      <h2>Result</h2>
+      <div class="verdict" id="verdict">not solved yet</div>
+      <table>
+        <tr><td>camera position in the mount frame</td><td id="r-pos">—</td></tr>
+        <tr><td>orientation (x, y, z, w)</td><td id="r-quat">—</td></tr>
+        <tr><td>focal length / principal point</td><td id="r-k">—</td></tr>
+        <tr><td>reprojection</td><td id="r-rms">—</td></tr>
+        <tr><td>target held still to</td><td id="r-spread">—</td></tr>
+        <tr><td>rotation coverage</td><td id="r-cov">—</td></tr>
+        <tr><td>cross-check</td><td id="r-cross">—</td></tr>
+      </table>
+      <div class="note">
+        <b>Target held still</b> is the number that counts. The target is
+        bolted down, so once the solution is applied every view must put it in
+        the same place; whatever is left over is error. Under ~2 mm is good,
+        over ~5 mm means something is wrong — usually a sample captured while
+        the arm was still moving, or too little wrist rotation.
+        <div class="meter" id="cov-meter"></div>
+      </div>
+      <pre id="yaml">solve to get a camera_info.yaml entry</pre>
+    </section>
+
+    <section class="card">
+      <h2>Samples <span class="spacer"></span><span id="p-usable"></span></h2>
+      <div class="shots" id="shots"></div>
+      <div class="note">Red means the target was not found in that frame; it is
+        kept but ignored. Vary the wrist angle between captures — translation
+        alone cannot determine the answer.</div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let viewHz = 5, seen = new Set();
+
+async function act(what) {
+  await fetch(`/do/${what}`, { method: "POST" });
+  poll();
+}
+for (const [id, what] of [["b-capture","capture"], ["b-solve","solve"],
+                          ["b-delete","delete_last"], ["b-clear","clear"],
+                          ["b-save","save"]]) {
+  $(id).addEventListener("click", () => act(what));
+}
+
+// The live view is a plain JPEG the server has already drawn on, so the
+// geometry lives in one place (Python) rather than being reimplemented here.
+function refreshLive() {
+  $("live").src = "/live.jpg?t=" + Date.now();
+}
+
+function renderShots(samples) {
+  const host = $("shots");
+  const keys = samples.map(s => `${s.index}:${s.detected}`).join(",");
+  if (host.dataset.keys === keys) return;
+  host.dataset.keys = keys;
+  host.innerHTML = samples.map(s => `
+    <div class="shot ${s.detected ? "" : "bad"}">
+      <img src="/sample/${s.index}.jpg" alt="sample ${s.index}">
+      <span>#${s.index} · ${s.detected ? s.points + " pts" : "no target"}</span>
+    </div>`).join("");
+}
+
+function renderCoverage(cov) {
+  // Three bars: how much the relative rotations spread over three axes. One
+  // bar lit means every capture turned the wrist the same way, which leaves
+  // part of the answer unconstrained.
+  const axes = (cov && cov.axes) || [0, 0, 0];
+  $("cov-meter").innerHTML = axes
+    .map(v => `<i class="${v > 0.2 ? "on" : ""}" title="${v}"></i>`).join("");
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch("/state")).json();
+    $("dot").style.background = "var(--ok)";
+    $("status").textContent = "live";
+    $("message").textContent = s.message;
+    $("p-samples").innerHTML = `<b>${s.n_samples}</b> samples`;
+    $("p-usable").textContent = `${s.n_usable} usable · need ${s.min_samples}`;
+    $("p-camera").textContent = `${s.camera} → ${s.frame}`;
+    $("p-target").innerHTML = s.detected
+      ? `target <b>visible</b>` : `target <b>not visible</b>`;
+    $("p-target").style.color = s.detected ? "var(--ok)" : "var(--warn)";
+    $("p-points").textContent = s.detected ? `${s.points} points` : s.target;
+    $("p-still").innerHTML = s.still ? "arm <b>still</b>" : "arm <b>moving</b>";
+    $("p-still").style.color = s.still ? "var(--ok)" : "var(--muted)";
+    $("b-capture").disabled = !s.still;
+
+    renderShots(s.samples);
+
+    const r = s.result;
+    if (!r) {
+      $("verdict").textContent = "not solved yet";
+      $("verdict").className = "verdict";
+      renderCoverage(null);
+    } else {
+      $("verdict").textContent = r.ok
+        ? "solved — this looks usable" : `solved, but: ${r.why}`;
+      $("verdict").className = "verdict " + (r.ok ? "good" : "bad");
+      $("r-pos").textContent = r.position.map(v => (v*1000).toFixed(1)).join(", ") + " mm";
+      $("r-quat").textContent = r.quat_xyzw.map(v => v.toFixed(4)).join(", ");
+      $("r-k").textContent = `${r.fx} / ${r.fy} · ${r.cx}, ${r.cy}`;
+      $("r-rms").textContent = `${r.rms} px`;
+      $("r-spread").textContent = `${r.spread_mm} mm · ${r.spread_deg}°`;
+      $("r-cov").textContent =
+        `${r.coverage.angles_deg.toFixed(0)}° over axes ${r.coverage.axes.join(", ")}`;
+      $("yaml").textContent = r.yaml;
+      renderCoverage(r.coverage);
+    }
+    $("r-cross").textContent = !s.cross_check ? "—"
+      : (s.cross_check.error || `${s.cross_check.distance_mm} mm vs ${s.cross_check.camera}`);
+  } catch (e) {
+    $("dot").style.background = "var(--err)";
+    $("status").textContent = "disconnected";
+  }
+}
+
+poll();
+setInterval(poll, 700);
+refreshLive();
+setInterval(refreshLive, 1000 / viewHz);
+</script>
+</body>
+</html>

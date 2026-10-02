@@ -119,3 +119,70 @@ cam3:
     - -0.6221993
     - 0.3235543
     - 0.3412652
+
+# cam4 -- the in-hand D405. NOT YET CALIBRATED: filling this in turns on the
+# predicted-trajectory overlay for the wrist view, and nothing else changes.
+#
+# Unlike the entries above, a camera on the gripper has no fixed pose in the
+# robot base frame, so `t`/`q` here are relative to the link it is bolted to
+# and `frame:` names that link. deploy/pi05/overlay.py composes them with
+# forward kinematics every frame:
+#
+#     T_base_cam(q) = FK(q, frame) @ (q_xyzw, t)
+#
+# k/d are the device's own intrinsics for the streaming profile -- factory
+# values, nothing to measure: read them from the SDK with the camera free, or
+# from /cam4/color/camera_info under the ROS backend.
+#
+# t/q are the hand-eye transform and do have to be measured (a fiducial in
+# view over several arm poses, cv2.calibrateHandEye), or taken off the mount
+# drawing if it is trustworthy. A sanity check that needs no target: with a
+# correct transform the gripper's own fingers sit still in the wrist image
+# however the arm moves, and the drawn fingertip lands on them.
+#
+# cam4:
+#   height: 270
+#   width: 480
+#   frame: fr3_hand_tcp          # the link the camera rides
+#   distortion_model: plumb_bob
+#   d: [...]
+#   k: [...]
+#   t: [...]                     # camera position in the `frame` above [m]
+#   q: [...]                     # camera orientation in it, [x, y, z, w]
+
+# inhand (218722271574) factory intrinsics at 480x270, model distortion.inverse_brown_conrady. Read off the device, not measured.
+# Extrinsics (frame/t/q) come from scripts/calibrate_handeye.py; until they are here
+# the panel will not draw a trajectory on this camera.
+# Hand-eye calibration: 13 views, 0.22 px reprojection, target stationary to 12.8 mm / 2.72 deg.
+# Hand-eye calibration: 12 views, 0.18 px reprojection, target stationary to 10.1 mm / 2.95 deg.
+# Hand-eye calibration: 12 views, 0.18 px reprojection, target stationary to 10.1 mm / 2.95 deg.
+cam4:
+  height: 270
+  width: 480
+  frame: fr3_hand_tcp          # rides this link; t/q are relative to it
+  distortion_model: plumb_bob
+  d:
+    - -0.05477401986718178
+    - 0.062039315700531006
+    - 0.0005665382486768067
+    - 0.001176120131276548
+    - -0.020700763911008835
+  k:
+    - 244.0913543701172
+    - 0.0
+    - 241.0927734375
+    - 0.0
+    - 243.4896240234375
+    - 136.5428466796875
+    - 0.0
+    - 0.0
+    - 1.0
+  t:
+    - -0.05438424411718995
+    - -0.034771024781541475
+    - -0.025901973976984946
+  q:
+    - -0.16174818276103473
+    - 0.07222872966546989
+    - -0.39434460594516496
+    - 0.9017277126418861

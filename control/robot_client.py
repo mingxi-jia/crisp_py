@@ -34,6 +34,7 @@ class RobotState:
     ee_quat_xyzw: np.ndarray
     joint_values: np.ndarray
     gripper_value: float | None
+    gripper_width_mm: float | None = None
     gripper_state: np.ndarray | None = None
     ft_wrench: np.ndarray | None = None
 
@@ -144,6 +145,7 @@ class RobotClient:
             "ee_quat_xyzw": decode_array(raw["ee_quat_xyzw"]),
             "joint_values": decode_array(raw["joint_values"]),
             "gripper_value": raw["gripper_value"],
+            "gripper_width_mm": raw.get("gripper_width_mm"),
             "gripper_state": decode_array(raw.get("gripper_state")),
             "ft_wrench": decode_array(raw.get("ft_wrench")),
         }

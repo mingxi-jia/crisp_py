@@ -32,7 +32,8 @@ class CameraSpec:
     def __init__(self, name: str, serial: str, width: int = 848, height: int = 480,
                  fps: int = 15, depth: bool = False,
                  exposure_us: float | None = None, gain: float | None = None,
-                 auto_exposure: bool | None = None):
+                 auto_exposure: bool | None = None,
+                 calibration: str | None = None):
         """depth defaults OFF, matching control/launch_cameras.launch.py.
 
         Nothing in the pi0.5 pipeline reads depth -- its observation is two RGB
@@ -54,6 +55,13 @@ class CameraSpec:
         # None = leave as-is; False = manual (required for exposure_us to hold).
         self.auto_exposure = (False if (auto_exposure is None and exposure_us is not None)
                               else auto_exposure)
+        # Which config/camera_info.yaml entry describes this camera. Kept
+        # separate from `name` because that file is named after whichever rig
+        # was calibrated: the camera this repo now calls `agentview` is `cam3`
+        # there. Nothing in the streaming path reads it -- it exists so a
+        # consumer that needs the camera's pose (the pi0.5 panel's trajectory
+        # overlay) can find the right entry instead of guessing by name.
+        self.calibration = calibration
 
     def __repr__(self):
         return (f"CameraSpec({self.name!r}, {self.serial!r}, "
@@ -426,7 +434,7 @@ def load_camera_config(path=None) -> tuple[list, str]:
 
     path = path or config_path()
     if not path.exists():
-        return [], "cam4"
+        return [], "inhand"
     data = yaml.safe_load(path.read_text()) or {}
     specs = []
     for name, cfg in (data.get("cameras") or {}).items():
@@ -435,4 +443,20 @@ def load_camera_config(path=None) -> tuple[list, str]:
         if serial is None:
             raise ValueError(f"{path.name}: camera {name!r} has no serial")
         specs.append(CameraSpec(name, str(serial), **cfg))
-    return specs, data.get("inhand_camera", "cam4")
+    return specs, data.get("inhand_camera", "inhand")
+
+
+def calibration_key(camera: str, path=None) -> str:
+    """The camera_info.yaml entry for `camera`, or its own name if unstated.
+
+    Falling back to the name keeps a camera that was calibrated under its own
+    name working with no `calibration:` line at all.
+    """
+    try:
+        specs, _ = load_camera_config(path)
+    except Exception:
+        return camera
+    for spec in specs:
+        if spec.name == camera:
+            return spec.calibration or camera
+    return camera

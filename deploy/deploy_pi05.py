@@ -4,6 +4,7 @@
 Everything π0.5 lives under deploy/pi05/:
     policy.py    the policy client and the DROID<->crisp conversions
     features.py  PCA and cosine-similarity maths (pure numpy)
+    overlay.py   FK + camera projection: the action chunk as a path on the image
     viz.py       the local OpenCV window
     panel.py     the web panel, served on its own port
 This file is the CLI and the control loop.
@@ -33,6 +34,28 @@ Prerequisites
        python -m deploy.deploy_pi05 --prompt "pick up the red block" \\
            --policy-host localhost --panel
 
+Seeing what it intends
+----------------------
+`--panel` draws the predicted chunk on the camera frame: the joint velocities
+are integrated into joint targets, run through forward kinematics, and
+projected with config/camera_info.yaml, so the plan can be read against the
+scene. Two things are worth checking the first time:
+
+    the FK residual the preflight prints. It compares FK against the pose the
+    robot reports for itself; millimetres means the chain is right, and
+    centimetres means the drawn path is fiction.
+
+    which calibration entry belongs to the camera. The names in
+    config/camera_info.yaml are from whichever rig was calibrated, not the
+    role names this repo uses, so each camera carries the mapping in
+    config/cameras.yaml (`agentview` is calibrated as `cam3`).
+    --overlay-calibration overrides it for a one-off.
+
+The path is drawn on the *raw* frame by default, with the --exterior-crop box
+on it, because the gripper often sits near the crop edge and a path drawn only
+inside the crop would be silently clipped. The panel's "policy input" tab
+shows the same path on the 224x224 the model is actually given.
+
 Going slower
 ------------
     --speed-scale 0.3     Each joint step is a third as far; the loop stays at
@@ -60,6 +83,68 @@ from deploy.pi05.policy import (
 )
 
 
+def build_overlays(args, state, frame_sizes=None):
+    """The panel's trajectory projectors, one per camera, with a preflight.
+
+    Checks forward kinematics against the pose the robot reports for itself
+    before anything is drawn: FK, the tip frame and the joint order all have to
+    be right, and a residual in millimetres is the proof. Centimetres means
+    something is wrong upstream of the drawing, so say so loudly rather than
+    putting a confident-looking line in the wrong place.
+
+    A camera with no calibration entry is reported and skipped, not fatal: the
+    agentview overlay is useful on its own.
+    """
+    from deploy.pi05.overlay import Overlay
+
+    frame_sizes = frame_sizes or {}
+    wanted = [("exterior", args.external_camera, args.exterior_fit,
+               parse_box(args.exterior_crop, "--exterior-crop"),
+               args.overlay_calibration),
+              ("wrist", args.wrist_camera, args.wrist_fit,
+               parse_box(args.wrist_crop, "--wrist-crop"),
+               args.wrist_calibration)]
+
+    overlays = []
+    for role, camera, fit, box, key in wanted:
+        overlay = Overlay(camera=camera, fit=fit, box=box, role=role,
+                          frame=args.overlay_frame, urdf=args.urdf,
+                          camera_info=args.camera_info, calibration_key=key)
+        if not overlay.available:
+            print(f"  overlay: {role} camera {camera!r} not drawn — "
+                  f"{overlay.unavailable_reason()}")
+            continue
+
+        mount = overlay.calibration.parent
+        where = ("static, in the robot base frame" if not overlay.calibration.moving
+                 else f"mounted on {mount}, placed by FK each frame")
+        print(f"  overlay: {role} {camera} via the "
+              f"{overlay.calibration_key!r} calibration ({where})")
+
+        if frame_sizes.get(role):
+            drift = overlay.calibration.aspect_mismatch(frame_sizes[role])
+            if drift > 0.002:
+                cw, ch = overlay.calibration.calib_size
+                w, h = frame_sizes[role]
+                print(f"           NOTE: calibrated at {cw}x{ch} but streaming "
+                      f"{w}x{h}, a {drift*100:.1f}% aspect difference. "
+                      f"Intrinsics are scaled, so expect the drawn point to "
+                      f"sit a few pixels off near the frame edges.")
+        overlays.append(overlay)
+
+    if overlays:
+        pos_mm, rot_deg = overlays[0].residual(state)
+        verdict = "ok" if pos_mm < 5.0 else "TOO LARGE -- do not trust the overlay"
+        print(f"           FK to {args.overlay_frame} vs the robot's reported "
+              f"pose: {pos_mm:.1f} mm / {rot_deg:.2f} deg ({verdict})")
+        if pos_mm >= 5.0:
+            print("           the model, the tip frame or the joint order "
+                  "disagrees with the driver. Check "
+                  "config/gripper_geometry.yaml and --urdf before believing "
+                  "the drawn path.")
+    return overlays
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -74,17 +159,19 @@ def parse_args():
                    help="policy server API key, if it requires one")
     p.add_argument("--prompt", default=None,
                    help="task instruction; prompted for interactively if omitted")
-    p.add_argument("--external-camera", default="cam1",
-                   help="camera used as the exterior view")
-    p.add_argument("--wrist-camera", default="cam4",
-                   help="camera used as the wrist view")
+    p.add_argument("--external-camera", default="agentview",
+                   help="camera used as the exterior view (a name from "
+                        "config/cameras.yaml)")
+    p.add_argument("--wrist-camera", default="inhand",
+                   help="camera used as the wrist view (a name from "
+                        "config/cameras.yaml)")
     p.add_argument("--exterior-fit", choices=["box", "crop", "pad"], default="box",
                    help="how the side view is made square: box (default, crop "
                         "the explicit --exterior-crop region), crop "
                         "(centre-crop), or pad (letterbox, as DROID trained)")
     p.add_argument("--exterior-crop", default="254,130,574,450", metavar="X0,Y0,X1,Y1",
                    help="crop region for --exterior-fit box, in source pixels. "
-                        "Default suits the 848x480 side view; it is validated "
+                        "Default suits the 848x480 agentview; it is validated "
                         "against the actual frame, so a stale box errors rather "
                         "than silently cropping the wrong place")
     p.add_argument("--wrist-fit", choices=["box", "crop", "pad"], default="pad",
@@ -92,7 +179,11 @@ def parse_args():
     p.add_argument("--wrist-crop", default=None, metavar="X0,Y0,X1,Y1",
                    help="crop region for --wrist-fit box")
     p.add_argument("--max-steps", type=int, default=600,
-                   help="stop after this many control steps")
+                   help="stop after this many control steps; 0 runs until "
+                        "Ctrl+C. The bound is deliberate: unlike teleop, "
+                        "where the arm only moves while a hand is on the "
+                        "stick, nothing here stops a policy that is quietly "
+                        "doing the wrong thing. 600 is 40 s at 15 Hz")
     p.add_argument("--open-loop-horizon", type=int, default=8,
                    help="actions executed per inference (8 ~ 0.5 s at 15 Hz)")
     p.add_argument("--speed-scale", type=float, default=1.0,
@@ -119,12 +210,80 @@ def parse_args():
                    help="with --on-stale hold/recover, give up after this long")
     p.add_argument("--panel", action="store_true",
                    help="serve the π0.5 panel (obs, PCA feature maps, "
-                        "click-to-cosine-similarity) on --panel-port")
+                        "click-to-cosine-similarity, predicted action chunk) "
+                        "on --panel-port")
     p.add_argument("--panel-port", type=int, default=7100)
+    p.add_argument("--prompt-history", default=None, metavar="PATH",
+                   help="where the panel's task history is kept "
+                        "(default ~/.cache/crisp/pi05_prompts.json)")
+    p.add_argument("--no-prompt-history", action="store_true",
+                   help="do not read or write the task history")
+    p.add_argument("--listen", action="store_true",
+                   help="take the task from the microphone: say it, then say "
+                        "\"done\". Speech between one \"done\" and the next "
+                        "accumulates, so the task can be said in several "
+                        "breaths. Needs --panel (that is where it is shown)")
+    p.add_argument("--listen-model", default="base.en",
+                   help="faster-whisper model. base.en is real-time on a CPU "
+                        "core; small.en is better on accents and costs ~3x")
+    p.add_argument("--listen-device", default="cpu", choices=["cpu", "cuda"],
+                   help="where to run it. cpu by default: the GPU is busy "
+                        "serving the policy, and a short utterance transcribes "
+                        "in a fraction of a second either way")
+    p.add_argument("--listen-alsa", default=None, metavar="DEVICE",
+                   help="ALSA capture device, e.g. plughw:2,0 (default: the "
+                        "system default). `arecord -l` lists them")
+    p.add_argument("--listen-terminator", default="done",
+                   help="the word that ends a spoken task")
+    p.add_argument("--listen-cancel", default="nevermind",
+                   help="the word that abandons what is being said, or -- said "
+                        "on its own -- puts the previous task back")
+    p.add_argument("--no-speak", action="store_true",
+                   help="do not read the task back through the speaker")
+    p.add_argument("--speak-engine", default="auto",
+                   choices=["auto", "piper", "spd-say", "none"],
+                   help="how to talk back. auto prefers Piper, a small neural "
+                        "voice that runs locally; spd-say drives espeak, which "
+                        "is robotic enough that Whisper mis-hears it")
+    p.add_argument("--speak-voice", default=None, metavar="NAME_OR_PATH",
+                   help="Piper voice, e.g. en_US-lessac-medium or a path to "
+                        "an .onnx (default: whatever is in ~/.cache/piper)")
+    p.add_argument("--samples", type=int, default=1, metavar="N",
+                   help="ask the policy for N plans per inference instead of "
+                        "one and draw them all on the panel. pi0.5 samples "
+                        "from noise, so they differ; where they fan out is "
+                        "where the policy is unsure. They come back from one "
+                        "batched forward pass, but that batch is still N times "
+                        "the work -- watch the inference time")
+    p.add_argument("--samples-every", type=int, default=1, metavar="K",
+                   help="only ask for the extra plans every Kth inference, so "
+                        "the control loop pays the bigger batch less often")
     p.add_argument("--pca-components", type=int, default=64,
                    help="PCA components kept for the panel's similarity maths")
     p.add_argument("--pca-fit-frames", type=int, default=8,
                    help="frames used to fit the PCA basis before it is held fixed")
+    p.add_argument("--overlay-frame", choices=["fingertip", "ee"], default="fingertip",
+                   help="which frame the panel draws on the image: the Robotiq "
+                        "fingertip (default, what the policy and the training "
+                        "data speak) or the end-effector frame the driver "
+                        "reports, ~6 cm up the gripper")
+    p.add_argument("--overlay-calibration", default=None, metavar="NAME",
+                   help="camera_info.yaml entry to use for the exterior "
+                        "overlay, overriding the camera's `calibration:` in "
+                        "config/cameras.yaml (agentview -> cam3)")
+    p.add_argument("--wrist-calibration", default=None, metavar="NAME",
+                   help="same for the wrist camera. A wrist camera needs an "
+                        "entry with `frame: <link>` -- its pose is fixed "
+                        "relative to the link it rides, not to the robot base")
+    p.add_argument("--camera-info", default=None, metavar="PATH",
+                   help="camera calibration for the overlay "
+                        "(default config/camera_info.yaml)")
+    p.add_argument("--urdf", default=None, metavar="PATH",
+                   help="robot model used for the overlay's forward kinematics "
+                        "(default control/fr3_robot.urdf)")
+    p.add_argument("--no-overlay", action="store_true",
+                   help="do not draw the predicted trajectory on the panel's "
+                        "observation")
     p.add_argument("--visualize", action="store_const", const="window",
                    default=None, dest="visualize",
                    help="also open a local OpenCV window (needs a display). "
@@ -229,6 +388,16 @@ def main():
         else:
             print(f"  {role:8s} {cam}: {src} -> {fit} -> 224x224")
 
+    overlays = []
+    if args.panel and not args.no_overlay:
+        sizes = {}
+        for role, cam in (("exterior", args.external_camera),
+                          ("wrist", args.wrist_camera)):
+            img = obs.rgb(cam)
+            if img is not None:
+                sizes[role] = (img.shape[1], img.shape[0])
+        overlays = build_overlays(args, state, sizes)
+
     prompt = args.prompt if args.prompt is not None else input("Task instruction: ")
 
     print(f"Connecting to policy server at {args.policy_host}:{args.policy_port} ...")
@@ -242,6 +411,8 @@ def main():
         exterior_fit=args.exterior_fit,
         wrist_fit=args.wrist_fit,
         want_features=bool(args.panel),
+        n_samples=args.samples if args.panel else 1,
+        samples_every=args.samples_every,
         exterior_box=parse_box(args.exterior_crop, "--exterior-crop"),
         wrist_box=parse_box(args.wrist_crop, "--wrist-crop"),
         binarize_gripper=not args.no_binarize_gripper,
@@ -250,6 +421,9 @@ def main():
         api_key=args.api_key,
     )
     print(f"  server metadata: {policy.server_metadata}")
+    if args.samples > 1 and not args.panel:
+        print("  NOTE: --samples only feeds the panel, and --panel is off; "
+              "asking for one plan per inference.")
     if args.panel and not policy.server_metadata.get("features"):
         print("  NOTE: this policy server does not advertise vision features. "
               "The panel will show observations but no PCA/similarity maps. "
@@ -271,14 +445,77 @@ def main():
               f"policy observes less often, so closed-loop behaviour will differ. "
               f"--speed-scale slows the arm without changing the feedback rate.")
 
-    panel_state = panel_analyser = None
+    panel_state = panel_analyser = panel_history = None
     if args.panel:
         from deploy.pi05 import panel as pi05_panel
         panel_state = pi05_panel.PanelState()
         panel_analyser = pi05_panel.FeatureAnalyser(
             n_components=args.pca_components, fit_frames=args.pca_fit_frames)
-        pi05_panel.serve(panel_state, panel_analyser, port=args.panel_port)
-        print(f"π0.5 panel: http://localhost:{args.panel_port}/")
+        panel_history = pi05_panel.PromptHistory(
+            False if args.no_prompt_history else args.prompt_history)
+        # The task this rollout started with belongs in the history too, so it
+        # is one click away next time.
+        panel_history.add(prompt)
+        pi05_panel.serve(panel_state, panel_analyser, port=args.panel_port,
+                         policy=policy, history=panel_history)
+        print(f"π0.5 panel: http://localhost:{args.panel_port}/  "
+              f"(the task can be retyped there)")
+
+    listener = None
+    if args.listen:
+        if not args.panel:
+            print("  NOTE: --listen without --panel; you will only see what "
+                  "was heard in this terminal.")
+        from control.speech import SpeechPrompter
+
+        # What has actually been asked for this session, oldest first. The
+        # persistent history is a different thing: it remembers across
+        # sessions and reorders by use, so it cannot answer "what was I doing
+        # before this one".
+        spoken_stack = [prompt]
+
+        def spoken(text):
+            """Same hand-off as the panel's text box: queue it, let the
+            control loop adopt it at a safe point."""
+            policy.request_prompt(text)
+            if panel_history is not None:
+                panel_history.add(text)
+            spoken_stack.append(text)
+            print(f'  [heard] task -> "{text}"')
+
+        def reverted():
+            """'nevermind' with nothing part-said: go back one task."""
+            if len(spoken_stack) < 2:
+                return None
+            spoken_stack.pop()
+            previous = spoken_stack[-1]
+            policy.request_prompt(previous)
+            print(f'  [heard] back to "{previous}"')
+            return previous
+
+        def vocabulary():
+            """Bias the transcriber towards the tasks actually used here.
+
+            Whisper's initial_prompt is a strong hint, and the task history is
+            exactly the right vocabulary: these are short commands, repeated,
+            full of object names no general model expects.
+            """
+            words = [] if panel_history is None else panel_history.prompts(8)
+            words += [args.listen_terminator, args.listen_cancel]
+            return ". ".join(words)
+
+        listener = SpeechPrompter(
+            spoken, on_cancel=reverted, model=args.listen_model,
+            device=args.listen_device, alsa_device=args.listen_alsa,
+            terminator=args.listen_terminator, cancel=args.listen_cancel,
+            speak=not args.no_speak, speak_engine=args.speak_engine,
+            speak_voice=args.speak_voice, hint=vocabulary)
+        listener.start()
+        voice = listener.status().get("voice")
+        print(f'Listening: say the task, then "{args.listen_terminator}"; '
+              f'"{args.listen_cancel}" to take it back. '
+              f"(loading {args.listen_model} the first time takes a moment)")
+        print(f"  talking back with: {voice or 'nothing — no speaker found'}")
 
     viz = None
     if args.visualize == "window":
@@ -291,22 +528,26 @@ def main():
     policy.reset()
     prev_gripper = None
     step = 0
+    interrupted = False
+    last_prompt = policy.prompt
 
     print(f'\nTask: "{prompt}"')
-    print(f"Running up to {args.max_steps} steps at {args.rate:.0f} Hz. "
+    bound = (f"up to {args.max_steps} steps"
+             if args.max_steps > 0 else "until stopped")
+    print(f"Running {bound} at {args.rate:.0f} Hz. "
           f"Ctrl+C to stop" + (", or q in the window" if args.visualize else "") + "." + ("  [DRY RUN — no motion]" if args.dry_run else ""))
 
     try:
-        while step < args.max_steps:
+        while args.max_steps <= 0 or step < args.max_steps:
             tick = time.perf_counter()
 
             # Cheap per-step read: the joint delta is applied to the *measured*
-            # position, as DROID does. Images are only fetched when the chunk
-            # runs out, since /get_obs is ~10x the cost of /get_state.
-            needs_inference = (policy._chunk is None
-                               or policy._chunk_index >= policy.open_loop_horizon
-                               or policy._chunk_index >= len(policy._chunk))
-            obs = (robot.get_obs(include_depth=False) if needs_inference
+            # position, as DROID does. Images are only fetched when the policy
+            # says it will re-infer, since /get_obs is ~10x the cost of
+            # /get_state. Ask it rather than re-deriving the condition here:
+            # a copy of it went stale the moment retasking could also force an
+            # inference, and the rollout died on a state-only observation.
+            obs = (robot.get_obs(include_depth=False) if policy.needs_inference
                    else robot.get_state())
 
             try:
@@ -333,12 +574,15 @@ def main():
 
             if panel_state is not None:
                 from deploy.pi05.panel import build_payload
-                panel_state.set(build_payload(policy, action, args, step, panel_analyser))
+                panel_state.set(build_payload(policy, action, args, step,
+                                              panel_analyser, obs, overlays,
+                                              panel_history, listener))
 
             if viz is not None:
                 keep_going = viz.update(
                     policy.last_request, action,
-                    {"step": f"{step}/{args.max_steps}",
+                    {"step": (f"{step}/{args.max_steps}" if args.max_steps > 0
+                              else str(step)),
                      "infer": (f"{policy.last_inference_ms:.0f} ms"
                                if policy.last_inference_ms else "--"),
                      "chunk": f"{policy._chunk_index}/{policy.open_loop_horizon}",
@@ -348,6 +592,10 @@ def main():
                 if not keep_going:
                     print("\nStopped from the visualizer (q).")
                     break
+
+            if policy.prompt != last_prompt:
+                print(f'  task -> "{policy.prompt}"')
+                last_prompt = policy.prompt
 
             if step % 15 == 0:
                 infer = (f"{policy.last_inference_ms:.0f} ms"
@@ -361,11 +609,27 @@ def main():
             time.sleep(max(0.0, period - (time.perf_counter() - tick)))
     except KeyboardInterrupt:
         print("\nStopped by user.")
+        interrupted = True
     finally:
         if viz is not None:
             viz.close()
+        if listener is not None:
+            listener.stop()
 
     print(f"\nRan {step} steps, {policy.n_inferences} inferences.")
+
+    # The panel dies with this process, and a rollout is short -- 600 steps at
+    # 15 Hz is 40 seconds, which is not long enough to finish looking at it.
+    # Ctrl+C during the rollout means "I am done", so only linger when the
+    # rollout ended by itself.
+    if panel_state is not None and not interrupted:
+        print(f"The panel is still serving the last step at "
+              f"http://localhost:{args.panel_port}/ — Ctrl+C to quit.")
+        try:
+            while True:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            print()
 
 
 if __name__ == "__main__":
